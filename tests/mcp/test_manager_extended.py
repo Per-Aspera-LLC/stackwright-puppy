@@ -659,15 +659,22 @@ class TestMCPManagerExtended:
                 assert "server1" in manager._managed_servers
                 assert "server2" in manager._managed_servers
 
-                # Servers with enabled=True (default) should start as RUNNING.
-                # Stackwright fix: auto-enable on startup — servers no longer
-                # require an explicit /mcp start command.
+                # Tracker state is STOPPED — no subprocess has been spawned.
+                # The enable() flag (checked by get_servers_for_agent) IS set,
+                # so servers are immediately available to pydantic-ai without /mcp start.
                 manager.status_tracker.set_status.assert_any_call(
-                    "server1", ServerState.RUNNING
+                    "server1", ServerState.STOPPED
                 )
                 manager.status_tracker.set_status.assert_any_call(
-                    "server2", ServerState.RUNNING
+                    "server2", ServerState.STOPPED
                 )
+
+                # The managed servers themselves should have enable() called —
+                # that's the flag get_servers_for_agent() gates on.
+                # MagicMock returns the same instance for every ManagedMCPServer()
+                # call, so check total call count == number of managed servers.
+                mock_instance = mock_managed_class.return_value
+                assert mock_instance.enable.call_count == len(manager._managed_servers)
 
     def test_initialization_handles_server_creation_failures(self):
         """Test that initialization handles individual server creation failures."""
