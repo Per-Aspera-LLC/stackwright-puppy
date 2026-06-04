@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "code-puppy"
+name = "stackwright-puppy"
 version = "0.0.574"
-description = "Code generation agent"
+description = "Stackwright-patched fork of code-puppy (MIT). Upstream: https://github.com/mpfaffenberger/code_puppy"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 dependencies = [
@@ -56,13 +56,15 @@ bedrock = ["boto3>=1.35.0"]
 durable = ["dbos>=2.11.0"]
 
 [project.urls]
-repository = "https://github.com/mpfaffenberger/code_puppy"
-HomePage = "https://github.com/mpfaffenberger/code_puppy"
+repository = "https://github.com/Per-Aspera-LLC/stackwright-pro"
+HomePage = "https://github.com/Per-Aspera-LLC/stackwright-pro"
+Upstream = "https://github.com/mpfaffenberger/code_puppy"
 
 
 [project.scripts]
 code-puppy = "code_puppy.main:main_entry"
 pup = "code_puppy.main:main_entry"
+raft-puppy = "code_puppy.main:main_entry"
 
 [tool.logfire]
 ignore_no_config = true
