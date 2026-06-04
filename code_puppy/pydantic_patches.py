@@ -14,11 +14,15 @@ from typing import Any
 
 
 def _get_code_puppy_version() -> str:
-    """Get the current code-puppy version."""
-    try:
-        return importlib.metadata.version("code-puppy")
-    except Exception:
-        return "0.0.0-dev"
+    """Get the current code-puppy/stackwright-puppy version."""
+    for _pkg in ("stackwright-puppy", "code-puppy"):
+        try:
+            _v = importlib.metadata.version(_pkg)
+            if _v:
+                return _v
+        except Exception:
+            continue
+    return "0.0.0-dev"
 
 
 def patch_user_agent() -> None:

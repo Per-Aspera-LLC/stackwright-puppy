@@ -40,5 +40,15 @@ my-project/
 
 ## Fork identity only
 
-The only other divergence from upstream is in `pyproject.toml` — package name, description,
+The only other divergence from upstream is in `pyproject.toml` --- package name, description,
 repository URLs, and the `raft-puppy` entry point alias. No logic changes.
+
+### Version detection cascade (cherry-pick this after rebase)
+
+`code_puppy/__init__.py` and `code_puppy/pydantic_patches.py` try
+`importlib.metadata.version("stackwright-puppy")` first, then fall back to
+`"code-puppy"`, then `"0.0.0-dev"`. Upstream only has the `"code-puppy"` lookup.
+
+When rebasing onto a new upstream release, these two files will be clobbered.
+Cherry-pick the commit titled `fix: version cascade for stackwright-puppy fork identity`
+to restore correct `raft-puppy --version` output.
