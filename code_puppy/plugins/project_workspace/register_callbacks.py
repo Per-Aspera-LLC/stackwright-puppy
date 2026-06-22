@@ -26,6 +26,7 @@ from .surfaces import agents as _agents_surface
 from .surfaces import file_permissions as _fp_surface
 from .surfaces import hooks as _hooks_surface
 from .surfaces import mcp as _mcp_surface
+from .surfaces import plugins as _plugins_surface
 from .surfaces import skills as _skills_surface
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ register_callback("startup", _startup)
 # startup hook always fires first and the config singleton is always populated.
 _agents_surface.register()
 _skills_surface.register()
+_plugins_surface.register()
 _mcp_surface.register()
 _fp_surface.register()
 _hooks_surface.register()
