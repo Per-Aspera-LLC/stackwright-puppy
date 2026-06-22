@@ -180,15 +180,29 @@ def _iter_plugin_skill_registrations() -> Iterable[tuple[str, str, dict[str, Any
             yield callback.__module__, callback.__name__, entry
 
 
-def _collect_plugin_skills() -> List[SkillInfo]:
+def _collect_plugin_skills() -> tuple[List[SkillInfo], set[str]]:
+    """Collect plugin-registered skills and exclusion requests.
+
+    Returns a ``(plugin_skills, exclusions)`` tuple where *exclusions* is the
+    set of skill names that callbacks requested to remove (via
+    ``{"name": ..., "exclude": True}`` entries in their ``register_skills``
+    return value).  Callers should apply exclusions *before* appending the
+    plugin skills so excluded names can be re-added by a project-scoped entry.
+    """
     if _PLUGIN_SKILLS_CACHE_DIR.exists():
         shutil.rmtree(_PLUGIN_SKILLS_CACHE_DIR, ignore_errors=True)
     _PLUGIN_SKILLS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     plugin_skills: List[SkillInfo] = []
     seen_names: set[str] = set()
+    exclusions: set[str] = set()
 
     for callback_module, callback_name, entry in _iter_plugin_skill_registrations():
+        if entry.get("exclude") is True:
+            name = str(entry.get("name") or "").strip()
+            if name:
+                exclusions.add(name)
+            continue
         skill = _materialize_plugin_skill(callback_module, callback_name, entry)
         if skill is None:
             continue
@@ -203,7 +217,7 @@ def _collect_plugin_skills() -> List[SkillInfo]:
         seen_names.add(skill.name)
         plugin_skills.append(skill)
 
-    return plugin_skills
+    return plugin_skills, exclusions
 
 
 def discover_skills(directories: Optional[List[Path]] = None) -> List[SkillInfo]:
@@ -262,7 +276,15 @@ def discover_skills(directories: Optional[List[Path]] = None) -> List[SkillInfo]
                     "Found skill directory without SKILL.md: %s", skill_dir.name
                 )
 
-    for plugin_skill in _collect_plugin_skills():
+    plugin_skills, skill_exclusions = _collect_plugin_skills()
+    # Apply exclusions first — cleared names can then be re-added by plugin entries
+    # (e.g. a project-scope callback removes the global version, then adds its own).
+    if skill_exclusions:
+        discovered_skills = [
+            s for s in discovered_skills if s.name not in skill_exclusions
+        ]
+        seen_skill_names -= skill_exclusions
+    for plugin_skill in plugin_skills:
         if plugin_skill.name in seen_skill_names:
             logger.debug(
                 "Skipping plugin skill '%s' because a filesystem skill already exists",
