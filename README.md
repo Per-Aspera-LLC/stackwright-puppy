@@ -206,6 +206,70 @@ Code Puppy loads rules from multiple locations, combining them in order:
 - `.code_puppy/` directory takes **precedence** over project root
 - All filename variants are supported: `AGENTS.md`, `AGENT.md`, `agents.md`, `agent.md`
 
+## Project Workspaces (`.code_puppy/`)
+
+Code Puppy supports **project-scoped configuration** via a `.code_puppy/` directory
+at your project root. Drop agents, skills, MCP servers, hooks, plugins, and file
+permission policies alongside your code — no global config edits required. Your
+team checks the directory in and everyone gets the same setup automatically.
+
+### Quick start
+
+```bash
+mkdir -p .code_puppy
+cat > .code_puppy/config.json << 'EOF'
+{
+  "profile": "strict-local"
+}
+EOF
+```
+
+Code Puppy walks up from the current directory to the nearest `.git/` boundary to
+find `.code_puppy/`. No workspace file? Everything falls back to the standard
+global (merge) behaviour — zero disruption.
+
+### Built-in profiles
+
+| Profile | Agents | Skills | Plugins | MCP | Hooks | File perms |
+|---------|--------|--------|---------|-----|-------|------------|
+| `merge` *(default)* | merge | merge | merge | merge | merge | merge |
+| `strict-local` | project | project | project | project | project | project |
+| `local-with-global-skills` | merge | global | project | project | project | project |
+| `local-mcp-only` | merge | merge | merge | project | merge | merge |
+| `custom` | merge | merge | merge | merge | merge | merge |
+
+Scope meanings: **merge** = global + project combined; **project** = project only;
+**global** = global only.
+
+### Per-surface overrides
+
+Fine-tune any surface independently — useful when a profile is almost right:
+
+```json
+{
+  "profile": "strict-local",
+  "overrides": {
+    "hooks": "merge"
+  }
+}
+```
+
+### What lives in `.code_puppy/`
+
+| Path | Surface |
+|------|---------|
+| `.code_puppy/config.json` | Profile + overrides |
+| `.code_puppy/agents/*.json` | Project JSON agents |
+| `.code_puppy/skills/<name>/SKILL.md` | Project skills |
+| `.code_puppy/plugins/<name>/register_callbacks.py` | Project plugins |
+| `.code_puppy/mcp_servers.json` | Project MCP servers |
+| `.code_puppy/hooks.json` | Project hooks |
+| `.code_puppy/file_policy.json` | File permission policy |
+
+See [docs/workspace-plugin-design.md](docs/workspace-plugin-design.md) for the
+full reference: surface semantics, policy format, discovery algorithm, and
+profile design rationale.
+
 ## Using MCP Servers for External Tools
 
 Use the `/mcp` command to manage MCP (list, start, stop, status, etc.)
