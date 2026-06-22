@@ -24,6 +24,7 @@ from code_puppy.workspace import discover_root
 from .config import WorkspaceConfig, load_workspace_config
 from .surfaces import agents as _agents_surface
 from .surfaces import file_permissions as _fp_surface
+from .surfaces import hooks as _hooks_surface
 from .surfaces import mcp as _mcp_surface
 from .surfaces import skills as _skills_surface
 
@@ -99,3 +100,4 @@ _agents_surface.register()
 _skills_surface.register()
 _mcp_surface.register()
 _fp_surface.register()
+_hooks_surface.register()
