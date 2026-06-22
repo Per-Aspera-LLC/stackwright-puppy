@@ -34,6 +34,8 @@
 
 ## Overview
 
+> **stackwright-puppy 0.0.575** — Ships workspace v2 (project-scoped agents, skills, MCP, hooks, plugins, and file-permissions in one `.code_puppy/` directory) and cleans up entry points: only `raft-puppy` is installed. The `code-puppy` and `pup` binaries have been removed from this fork to avoid shadowing upstream's package.
+
 *This project was coded angrily in reaction to Windsurf and Cursor removing access to models and raising prices.*
 
 *You could also run 50 code puppies at once if you were insane enough.*
@@ -48,7 +50,7 @@ Code Puppy is an AI-powered code generation agent, designed to understand progra
 ## Quick start
 
 ```bash
-uvx code-puppy -i
+uvx --from stackwright-puppy raft-puppy -i
 ````
 
 ## Installation
@@ -61,7 +63,7 @@ uvx code-puppy -i
 # Install UV if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-uvx code-puppy
+uvx --from stackwright-puppy raft-puppy
 ```
 
 #### Windows
@@ -72,7 +74,7 @@ On Windows, we recommend installing code-puppy as a global tool for the best exp
 # Install UV if you don't have it (run in PowerShell as Admin)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-uvx code-puppy
+uvx --from stackwright-puppy raft-puppy
 ```
 
 #### Optional: DBOS durable execution

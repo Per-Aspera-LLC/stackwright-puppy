@@ -2064,7 +2064,7 @@ wheels = [
 
 [[package]]
 name = "stackwright-puppy"
-version = "0.0.574"
+version = "0.0.575"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

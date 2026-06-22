@@ -1,9 +1,22 @@
 # Changes from upstream code-puppy
 
 Base: `code-puppy@0.0.574` — https://github.com/mpfaffenberger/code_puppy
+Current release: `stackwright-puppy@0.0.575`
 
 **Workspace v2 is fully shipped** (phases A–H complete, all 6 surfaces working).
 See `docs/workspace-plugin-design.md` for the design reference.
+
+## Release notes
+
+### 0.0.575 (2026-06-22)
+
+- **Workspace v2 shipped** — full per-surface project scoping across 6 extension
+  surfaces (agents, skills, plugins, MCP, hooks, file permissions). Profile-based
+  config via `.code_puppy/config.json`. 304 tests passing.
+- **Entry-point change** — only `raft-puppy` is installed by this fork.
+  `code-puppy` and `pup` entry points have been removed to stop shadowing
+  upstream's binaries. Users of this fork should use `raft-puppy` (or
+  `uvx --from stackwright-puppy raft-puppy`).
 
 ## Fork identity only
 

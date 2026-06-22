@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stackwright-puppy"
-version = "0.0.574"
+version = "0.0.575"
 description = "Stackwright-patched fork of code-puppy (MIT). Upstream: https://github.com/mpfaffenberger/code_puppy"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -62,8 +62,6 @@ Upstream = "https://github.com/mpfaffenberger/code_puppy"
 
 
 [project.scripts]
-code-puppy = "code_puppy.main:main_entry"
-pup = "code_puppy.main:main_entry"
 raft-puppy = "code_puppy.main:main_entry"
 
 [tool.logfire]
