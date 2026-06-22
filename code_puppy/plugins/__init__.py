@@ -414,22 +414,39 @@ def load_plugin_callbacks() -> dict[str, list[str]]:
 
     plugins_dir = Path(__file__).parent
 
-    # Pre-scan project plugin names so we can skip user plugins that the
-    # project tier will supersede (project wins, matching agents dedup).
+    # Phase E (RISK-2): read workspace plugin scope BEFORE loading user/project
+    # tiers so we can gate them correctly.  workspace_bootstrap is stdlib-only
+    # — no circular import risk.  Any failure returns "merge" (all tiers load).
+    import code_puppy.workspace_bootstrap as _wb  # noqa: PLC0415
+
+    plugin_scope = _wb.read_plugin_scope()
+    logger.debug("[plugins] bootstrap plugin_scope=%s", plugin_scope)
+
     project_plugins_dir = get_project_plugins_directory()
-    project_plugin_names = (
+    # Only pre-scan project names when the project tier will actually load;
+    # skipping the scan when scope=global avoids spurious user-plugin drops.
+    project_plugin_names: set[str] = (
         _scan_plugin_names(project_plugins_dir)
-        if project_plugins_dir is not None
+        if project_plugins_dir is not None and plugin_scope != "global"
         else set()
     )
 
     builtin_loaded = _load_builtin_plugins(plugins_dir)
-    user_skip_names = set(builtin_loaded) | project_plugin_names
-    user_loaded = _load_user_plugins(USER_PLUGINS_DIR, skip_names=user_skip_names)
 
-    # Load project plugins last (highest precedence)
-    project_loaded = []
-    if project_plugins_dir is not None:
+    # project scope → suppress user-tier plugins (builtin + project only).
+    if plugin_scope == "project":
+        logger.info("[plugins] plugin_scope=project — skipping user-tier plugins")
+        user_loaded: list[str] = []
+    else:
+        user_skip_names = set(builtin_loaded) | project_plugin_names
+        user_loaded = _load_user_plugins(USER_PLUGINS_DIR, skip_names=user_skip_names)
+
+    # Load project plugins last (highest precedence).
+    # global scope → suppress project-tier plugins (builtin + user only).
+    project_loaded: list[str] = []
+    if plugin_scope == "global":
+        logger.info("[plugins] plugin_scope=global — skipping project-tier plugins")
+    elif project_plugins_dir is not None:
         logger.info(f"Loading project plugins from {project_plugins_dir}")
         project_loaded = _load_project_plugins(
             project_plugins_dir,
