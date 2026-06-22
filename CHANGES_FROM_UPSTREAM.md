@@ -2,6 +2,9 @@
 
 Base: `code-puppy@0.0.574` — https://github.com/mpfaffenberger/code_puppy
 
+**Workspace v2 is fully shipped** (phases A–H complete, all 6 surfaces working).
+See `docs/workspace-plugin-design.md` for the design reference.
+
 ## Fork identity only
 
 The only divergence from upstream is in `pyproject.toml` — package name
@@ -23,9 +26,12 @@ Cherry-pick the commit titled
 ## Workspace plugin core edits
 
 The `project_workspace` plugin (under `code_puppy/plugins/project_workspace/`)
-requires two small, backward-compatible extensions to upstream callback
-processors.  These are the **only** logic changes to files outside the plugin
-tree.  See `docs/workspace-plugin-design.md` for full context.
+requires three small, backward-compatible extensions to upstream callback
+processors. These are the **only** logic changes to files outside the plugin
+tree. See `docs/workspace-plugin-design.md` for full context.
+
+All three edits are documented with cherry-pick commit titles below so they can
+be cleanly re-applied after an upstream rebase.
 
 ### 1. `register_agents` exclude support — `code_puppy/agents/agent_manager.py`
 
@@ -55,10 +61,10 @@ callers are updated in the same commit.
 
 ### 3. Scope-gated plugin tier loading — `code_puppy/plugins/__init__.py`
 
-Added in Phase E (RISK-2 resolution).  In `load_plugin_callbacks()`, before
-the user-tier and project-tier loading steps, a call to
-`workspace_bootstrap.read_plugin_scope()` determines whether each tier
-should load:
+Added in Phase E (commit `9299324`, RISK-2 resolution).  In
+`load_plugin_callbacks()`, before the user-tier and project-tier loading steps,
+a call to `workspace_bootstrap.read_plugin_scope()` determines whether each
+tier should load:
 
 - **project** scope → user-tier plugins skipped (builtin + project only)
 - **global** scope → project-tier plugins skipped (builtin + user only)
@@ -76,13 +82,37 @@ The companion module `code_puppy/workspace_bootstrap.py` (new file, ~120 LOC
 including docstrings) contains the pre-plugin config reader.  It is
 purposefully stdlib-only and independent of all other `code_puppy.*` modules.
 
-### Rebase note
+## Own files — no rebase conflicts
 
-When rebasing onto a new upstream release, all three files below may be
-clobbered.  Cherry-pick the commits titled:
+These files are entirely new in the fork and will never conflict on upstream
+rebase:
 
-- `feat(agents): add exclude support to register_agents callback` (Phase C)
-- `feat(skills): add exclude support to register_skills callback` (Phase D)
-- `feat(plugins): pre-load workspace config read for scope-aware plugin loading` (Phase E)
+- `code_puppy/workspace.py` — workspace root discovery (`discover_root()`)
+- `code_puppy/workspace_bootstrap.py` — stdlib-only pre-plugin scope reader
+- `code_puppy/plugins/project_workspace/` — the entire plugin tree (6 surfaces)
+- `docs/workspace-plugin-design.md` — 954-line design reference
+- `tests/test_workspace.py`, `tests/test_workspace_bootstrap.py` — unit tests
+- `tests/plugins/project_workspace/` — surface + integration tests
 
-to restore the workspace plugin core hooks.
+## Rebase protocol — 5 commit-classes to preserve
+
+When rebasing onto a new upstream release, cherry-pick these commits **in
+order** after the rebase to restore all fork-local changes:
+
+1. **Fork identity** — `pyproject.toml` (package name, URLs, entry point)
+2. **Version cascade** — `code_puppy/__init__.py` + `code_puppy/pydantic_patches.py`
+   (title: `fix: version cascade for stackwright-puppy fork identity`)
+3. **Agents exclude** — `code_puppy/agents/agent_manager.py`, +4 LOC
+   (title: `feat(agents): add exclude support to register_agents callback`)
+4. **Skills exclude** — `code_puppy/plugins/agent_skills/discovery.py`, +9 LOC
+   (title: `feat(skills): add exclude support to register_skills callback`)
+5. **Plugin scope** — `code_puppy/plugins/__init__.py` + `workspace_bootstrap.py`, ~20 LOC
+   (title: `feat(plugins): pre-load workspace config read for scope-aware plugin loading`)
+
+Commits for classes 3–5 are small, well-contained, and all three can typically
+be cherry-picked without conflict because they touch distinct sections of their
+respective files.
+
+The own-files tree (classes 3–5 companion files + the plugin tree) cherry-picks
+automatically without conflicts since upstream does not contain any of those
+paths.
