@@ -23,6 +23,7 @@ from code_puppy.workspace import discover_root
 
 from .config import WorkspaceConfig, load_workspace_config
 from .surfaces import agents as _agents_surface
+from .surfaces import skills as _skills_surface
 
 logger = logging.getLogger(__name__)
 
@@ -93,3 +94,4 @@ register_callback("startup", _startup)
 # Config is read *inside* the callback body (at call time), not here, so the
 # startup hook always fires first and the config singleton is always populated.
 _agents_surface.register()
+_skills_surface.register()
