@@ -53,12 +53,36 @@ Backward-compatible: existing callbacks that return plain skill dicts are
 unaffected; the old `_collect_plugin_skills() -> List[SkillInfo]` signature
 callers are updated in the same commit.
 
+### 3. Scope-gated plugin tier loading — `code_puppy/plugins/__init__.py`
+
+Added in Phase E (RISK-2 resolution).  In `load_plugin_callbacks()`, before
+the user-tier and project-tier loading steps, a call to
+`workspace_bootstrap.read_plugin_scope()` determines whether each tier
+should load:
+
+- **project** scope → user-tier plugins skipped (builtin + project only)
+- **global** scope → project-tier plugins skipped (builtin + user only)
+- **merge** scope → all three tiers load (unchanged default behaviour)
+
+The import is done inline (`import code_puppy.workspace_bootstrap as _wb`)
+to avoid any circular-import risk at module parse time.  `read_plugin_scope()`
+is stdlib-only and always returns a safe default on error, so failure here
+cannot crash startup.
+
+Backward-compatible: without a `.code_puppy/config.json` in the tree,
+`read_plugin_scope()` returns `"merge"` and all tiers load exactly as before.
+
+The companion module `code_puppy/workspace_bootstrap.py` (new file, ~120 LOC
+including docstrings) contains the pre-plugin config reader.  It is
+purposefully stdlib-only and independent of all other `code_puppy.*` modules.
+
 ### Rebase note
 
-When rebasing onto a new upstream release, both files above may be clobbered.
-Cherry-pick the commit titled:
+When rebasing onto a new upstream release, all three files below may be
+clobbered.  Cherry-pick the commits titled:
 
-- `feat(skills): add exclude support to register_skills callback` (Phase D)
 - `feat(agents): add exclude support to register_agents callback` (Phase C)
+- `feat(skills): add exclude support to register_skills callback` (Phase D)
+- `feat(plugins): pre-load workspace config read for scope-aware plugin loading` (Phase E)
 
 to restore the workspace plugin core hooks.
