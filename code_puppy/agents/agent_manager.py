@@ -314,8 +314,11 @@ def _discover_agents(message_group_id: Optional[str] = None):
 
                 agent_name = agent_def["name"]
 
-                # Support both class-based and JSON path-based registration
-                if "class" in agent_def:
+                # Support class-based, JSON path-based, or exclusion registration
+                if agent_def.get("exclude") is True:
+                    # Allows workspace-scope plugins to suppress upstream-discovered agents
+                    _AGENT_REGISTRY.pop(agent_name, None)
+                elif "class" in agent_def:
                     agent_class = agent_def["class"]
                     if isinstance(agent_class, type) and issubclass(
                         agent_class, BaseAgent
