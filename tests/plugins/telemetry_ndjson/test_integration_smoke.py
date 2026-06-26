@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+from types import SimpleNamespace
 
+import pytest
 from pydantic import TypeAdapter
 
 from code_puppy.callbacks import _trigger_callbacks, _trigger_callbacks_sync
@@ -167,10 +169,11 @@ def test_full_hook_roundtrip(reloaded_telemetry):
 
 
 def test_tool_complete_success_failure(reloaded_telemetry):
-    """post_tool_call maps result dicts to payload.success correctly.
+    """post_tool_call maps result dicts to success correctly (flat shape).
 
     Locks the contract that error-bearing results → success=False and
-    clean results → success=True. Regression guard for ADR δ.
+    clean results → success=True.  Fields live at root (no nested payload).
+    Regression guard for ADR δ + Phase 3 flattening.
     """
     ndjson_path = reloaded_telemetry
     adapter = TypeAdapter(OtterEvent)
@@ -203,8 +206,241 @@ def test_tool_complete_success_failure(reloaded_telemetry):
 
     ev_fail = adapter.validate_json(lines[0])
     assert isinstance(ev_fail, ToolCompleteEvent)
-    assert ev_fail.payload.success is False, "expected success=False for error result"
+    assert ev_fail.success is False, "expected success=False for error result"
 
     ev_ok = adapter.validate_json(lines[1])
     assert isinstance(ev_ok, ToolCompleteEvent)
-    assert ev_ok.payload.success is True, "expected success=True for clean result"
+    assert ev_ok.success is True, "expected success=True for clean result"
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent translation tests (invoke_agent → agent_invoke_start/complete)
+# ---------------------------------------------------------------------------
+
+
+def test_invoke_agent_emits_agent_invoke_start_not_tool_call(reloaded_telemetry):
+    """pre_tool_call with 'invoke_agent' must emit agent_invoke_start, NOT tool_call.
+
+    Regression guard: the plugin-side translation (SUBAGENT_TOOLS gate) must
+    suppress the generic tool_call path so the Pro side doesn't double-count.
+    """
+    from code_puppy.plugins.telemetry_ndjson import register_callbacks as rc
+
+    ndjson_path = reloaded_telemetry
+
+    asyncio.run(
+        rc._on_pre_tool_call(
+            "invoke_agent",
+            {"agent_name": "qa-kitten", "prompt": "go"},
+        )
+    )
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, f"expected exactly 1 event, got {len(lines)}: {lines}"
+
+    ev = json.loads(lines[0])
+    assert ev["type"] == "agent_invoke_start", f"wrong type: {ev['type']}"
+    assert ev["targetOtter"] == "qa-kitten"
+
+    types = {json.loads(line)["type"] for line in lines}
+    assert "tool_call" not in types, (
+        "tool_call must be suppressed for sub-agent dispatch"
+    )
+
+
+def test_invoke_agent_with_model_carries_model_field(reloaded_telemetry):
+    """invoke_agent_with_model passes model_name through to AgentInvokeStartEvent.model."""
+    from code_puppy.plugins.telemetry_ndjson import register_callbacks as rc
+
+    ndjson_path = reloaded_telemetry
+
+    asyncio.run(
+        rc._on_pre_tool_call(
+            "invoke_agent_with_model",
+            {"agent_name": "obsidian-agent", "prompt": "x", "model_name": "gpt-4o"},
+        )
+    )
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+
+    ev = json.loads(lines[0])
+    assert ev["type"] == "agent_invoke_start"
+    assert ev["targetOtter"] == "obsidian-agent"
+    assert ev["model"] == "gpt-4o"
+
+
+def test_invoke_agent_complete_emits_agent_invoke_complete_not_tool_complete(
+    reloaded_telemetry,
+):
+    """post_tool_call with 'invoke_agent' emits agent_invoke_complete, NOT tool_complete.
+
+    Also verifies success=True when result.error is None, and durationSec conversion.
+    """
+    from code_puppy.plugins.telemetry_ndjson import register_callbacks as rc
+
+    ndjson_path = reloaded_telemetry
+    result = SimpleNamespace(
+        agent_name="qa-kitten", error=None, response="hello", model_name=None
+    )
+
+    asyncio.run(
+        rc._on_post_tool_call(
+            "invoke_agent",
+            {"agent_name": "qa-kitten", "prompt": "x"},
+            result,
+            1234.0,
+        )
+    )
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, f"expected 1 event (no response env var), got {len(lines)}"
+
+    ev = json.loads(lines[0])
+    assert ev["type"] == "agent_invoke_complete"
+    assert ev["success"] is True
+    assert ev["targetOtter"] == "qa-kitten"
+    assert ev["durationSec"] == pytest.approx(1.234)
+
+    types = {json.loads(line)["type"] for line in lines}
+    assert "tool_complete" not in types, (
+        "tool_complete must be suppressed for sub-agent"
+    )
+
+
+def test_invoke_agent_complete_propagates_error_as_success_false(reloaded_telemetry):
+    """When result.error is non-None, agent_invoke_complete carries success=False."""
+    from code_puppy.plugins.telemetry_ndjson import register_callbacks as rc
+
+    ndjson_path = reloaded_telemetry
+    result = SimpleNamespace(
+        agent_name="qa-kitten", error="boom", response=None, model_name=None
+    )
+
+    asyncio.run(rc._on_post_tool_call("invoke_agent", {}, result, 500.0))
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+
+    ev = json.loads(lines[0])
+    assert ev["type"] == "agent_invoke_complete"
+    assert ev["success"] is False
+
+
+def test_invoke_agent_complete_handles_dict_result(reloaded_telemetry):
+    """The _get() helper in post_tool_call handles plain dict results (not just attrs).
+
+    Confirms that both AgentInvokeOutput-style objects AND dict results from
+    agents that return plain dicts are handled without AttributeError.
+    """
+    from code_puppy.plugins.telemetry_ndjson import register_callbacks as rc
+
+    ndjson_path = reloaded_telemetry
+    result = {
+        "agent_name": "qa-kitten",
+        "error": None,
+        "response": "hello",
+        "model_name": None,
+    }
+
+    asyncio.run(rc._on_post_tool_call("invoke_agent", {}, result, 1000.0))
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+
+    ev = json.loads(lines[0])
+    assert ev["type"] == "agent_invoke_complete"
+    assert ev["success"] is True
+    assert ev["targetOtter"] == "qa-kitten"
+
+
+def test_subagent_response_env_var_off_skips_response_event(
+    reloaded_telemetry, monkeypatch
+):
+    """With STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES unset, no agent_response.
+
+    Only agent_invoke_complete should be emitted — response text is dropped
+    because sub-agent responses can be large and are off by default.
+    """
+    from code_puppy.plugins.telemetry_ndjson import register_callbacks as rc
+
+    monkeypatch.delenv("STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES", raising=False)
+    ndjson_path = reloaded_telemetry
+    result = SimpleNamespace(
+        agent_name="qa-kitten", error=None, response="hello world", model_name=None
+    )
+
+    asyncio.run(rc._on_post_tool_call("invoke_agent", {}, result, 100.0))
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, (
+        f"expected 1 event (complete only, no response), got {len(lines)}: {lines}"
+    )
+    types = {json.loads(line)["type"] for line in lines}
+    assert "agent_invoke_complete" in types
+    assert "agent_response" not in types
+
+
+def test_subagent_response_env_var_on_emits_response_event(
+    reloaded_telemetry, monkeypatch
+):
+    """STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES=1 enables AgentResponseEvent.
+
+    Both agent_invoke_complete AND agent_response must appear; the response
+    event carries the sub-agent's .response text.
+    """
+    from code_puppy.plugins.telemetry_ndjson import register_callbacks as rc
+
+    monkeypatch.setenv("STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES", "1")
+    ndjson_path = reloaded_telemetry
+    result = SimpleNamespace(
+        agent_name="qa-kitten", error=None, response="hello world", model_name=None
+    )
+
+    asyncio.run(rc._on_post_tool_call("invoke_agent", {}, result, 100.0))
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2, (
+        f"expected 2 events (complete + response), got {len(lines)}: {lines}"
+    )
+
+    events = [json.loads(line) for line in lines]
+    types = {e["type"] for e in events}
+    assert "agent_invoke_complete" in types
+    assert "agent_response" in types
+
+    response_ev = next(e for e in events if e["type"] == "agent_response")
+    assert response_ev["text"] == "hello world"
+
+
+def test_non_subagent_tool_still_emits_tool_call_and_complete(reloaded_telemetry):
+    """Non-sub-agent tools still produce tool_call + tool_complete (flat shape).
+
+    Regression guard: the SUBAGENT_TOOLS gate must be an early return, not a
+    full replacement of the normal emit path.
+    """
+    from code_puppy.plugins.telemetry_ndjson import register_callbacks as rc
+
+    ndjson_path = reloaded_telemetry
+
+    asyncio.run(rc._on_pre_tool_call("read_file", {"path": "/foo"}))
+    asyncio.run(
+        rc._on_post_tool_call("read_file", {"path": "/foo"}, {"content": "hello"}, 50.0)
+    )
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2, f"expected 2 events, got {len(lines)}"
+
+    events = [json.loads(line) for line in lines]
+    types = [e["type"] for e in events]
+    assert "tool_call" in types
+    assert "tool_complete" in types
+
+    # Verify flat shape on tool_complete — old nested .payload must be gone
+    tc_ev = next(e for e in events if e["type"] == "tool_complete")
+    assert tc_ev["toolName"] == "read_file"
+    assert tc_ev["success"] is True
+    assert tc_ev["durationMs"] == pytest.approx(50.0)
+    assert "payload" not in tc_ev, (
+        "nested payload shape must be gone (Phase 3 breaking change)"
+    )
