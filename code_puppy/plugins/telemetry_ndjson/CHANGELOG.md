@@ -2,6 +2,12 @@
 
 All notable changes to this plugin follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Fix**: Deserialize JSON-string `result` in `_on_post_tool_call` so `AgentResponseEvent` actually fires when `STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES=1`. Pydantic-AI's `_call_tool` returns the sub-agent payload as a JSON string, which `getattr()` could not navigate. (beads `swp-9pc0`)
+
 ## [1.1.0] — Unreleased
 
 ### Changed

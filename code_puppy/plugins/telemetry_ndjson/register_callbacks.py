@@ -60,6 +60,7 @@ Bead: code_puppy-vbt
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any
@@ -181,7 +182,18 @@ async def _on_post_tool_call(*args: Any, **kwargs: Any) -> None:
         )
 
         if tool_name in SUBAGENT_TOOLS:
+            # pydantic-ai's _call_tool serializes AgentInvokeOutput to a JSON string
+            # before returning. Deserialize so _get(result, "response") works.
+            # (beads swp-9pc0)
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except (json.JSONDecodeError, ValueError):
+                    pass  # leave as str; _get returns None gracefully
+
             # result is an AgentInvokeOutput-like object or dict — handle both.
+            # NOTE: this branch ends with an explicit `return`, so the rebound
+            # `result` does not flow into _is_successful_result below.
             def _get(obj: Any, key: str, default: Any = None) -> Any:
                 if obj is None:
                     return default
