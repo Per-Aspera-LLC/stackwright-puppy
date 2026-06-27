@@ -167,10 +167,13 @@ def test_full_hook_roundtrip(reloaded_telemetry):
 
 
 def test_tool_complete_success_failure(reloaded_telemetry):
-    """post_tool_call maps result dicts to payload.success correctly.
+    """post_tool_call maps result dicts to success correctly (flat layout).
 
     Locks the contract that error-bearing results → success=False and
     clean results → success=True. Regression guard for ADR δ.
+
+    ToolCompleteEvent uses flat fields (code_puppy-9hu / swp-im3c v1);
+    asserting on .success directly, NOT .payload.success.
     """
     ndjson_path = reloaded_telemetry
     adapter = TypeAdapter(OtterEvent)
@@ -203,8 +206,8 @@ def test_tool_complete_success_failure(reloaded_telemetry):
 
     ev_fail = adapter.validate_json(lines[0])
     assert isinstance(ev_fail, ToolCompleteEvent)
-    assert ev_fail.payload.success is False, "expected success=False for error result"
+    assert ev_fail.success is False, "expected success=False for error result"
 
     ev_ok = adapter.validate_json(lines[1])
     assert isinstance(ev_ok, ToolCompleteEvent)
-    assert ev_ok.payload.success is True, "expected success=True for clean result"
+    assert ev_ok.success is True, "expected success=True for clean result"

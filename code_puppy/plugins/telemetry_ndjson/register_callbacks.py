@@ -37,7 +37,6 @@ from code_puppy.plugins.telemetry_ndjson.otter_event import (
     ThinkingEvent,
     ToolCallEvent,
     ToolCompleteEvent,
-    ToolCompletePayload,
     next_seq,
     now_iso,
 )
@@ -113,11 +112,9 @@ async def _on_post_tool_call(*args: Any, **kwargs: Any) -> None:
             ToolCompleteEvent(
                 ts=now_iso(),
                 seq=next_seq(),
-                payload=ToolCompletePayload(
-                    toolName=str(tool_name),
-                    success=_is_successful_result(result),
-                    durationMs=duration_ms,
-                ),
+                toolName=str(tool_name),
+                success=_is_successful_result(result),
+                durationMs=duration_ms,
             )
         )
     except Exception as e:

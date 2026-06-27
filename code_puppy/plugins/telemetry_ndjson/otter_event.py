@@ -1,11 +1,11 @@
 """Pydantic mirror of the OtterEvent schema for raft-puppy telemetry emission.
 
 Canonical Zod source:
-    ../stackwright/otter-viz/packages/events/src/schemas.ts
+    ../stackwright/pro/packages/telemetry/src/schemas.ts  (as of swp-im3c v1)
 Schema ownership decision:
     ../stackwright/otter-viz/docs/schema-ownership-decision.md  (ADR-002)
-Bead:
-    code_puppy-vbt
+Beads:
+    code_puppy-vbt (original), code_puppy-9hu (flat tool_complete alignment)
 
 ## Variants intentionally NOT mirrored
 
@@ -129,25 +129,19 @@ class ToolCallEvent(OtterBase):
     args: dict[str, Any] | None = None
 
 
-class ToolCompletePayload(BaseModel):
-    """Nested payload for ToolCompleteEvent.
+class ToolCompleteEvent(OtterBase):
+    """Tool invocation completion with timing and success flag.
 
-    Keeps the nested-payload shape matching current Zod. bead swp-im3c may
-    flatten this on the Pro side in the future — that's Pro's call, not ours.
+    Flat layout mirrors ``@stackwright-pro/telemetry`` ToolCompleteSchema
+    (swp-im3c v1, PR #349). Fields sit on the event root — no nested
+    ``payload`` — matching the ``ToolCallEvent`` layout (paired events use
+    consistent structure per otter-viz AGENTS.md convention).
     """
 
+    type: Literal["tool_complete"] = "tool_complete"
     toolName: str
     success: bool | None = None
     durationMs: float | None = None
-
-    model_config = {"extra": "forbid"}
-
-
-class ToolCompleteEvent(OtterBase):
-    """Tool invocation completion with timing and success flag."""
-
-    type: Literal["tool_complete"] = "tool_complete"
-    payload: ToolCompletePayload
 
 
 class AgentInvokeStartEvent(OtterBase):
@@ -214,7 +208,6 @@ __all__ = [
     "FileReadEvent",
     "FileWriteEvent",
     "ToolCallEvent",
-    "ToolCompletePayload",
     "ToolCompleteEvent",
     "AgentInvokeStartEvent",
     "AgentInvokeCompleteEvent",
