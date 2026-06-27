@@ -129,25 +129,21 @@ class ToolCallEvent(OtterBase):
     args: dict[str, Any] | None = None
 
 
-class ToolCompletePayload(BaseModel):
-    """Nested payload for ToolCompleteEvent.
+class ToolCompleteEvent(OtterBase):
+    """Tool invocation completion with timing and success flag.
 
-    Keeps the nested-payload shape matching current Zod. bead swp-im3c may
-    flatten this on the Pro side in the future — that's Pro's call, not ours.
+    **Flat layout** — ``toolName``, ``success``, and ``durationMs`` live at the
+    root of this event, with no nested ``payload`` object.  This mirrors the
+    canonical ``ToolCompleteSchema`` in
+    ``../pro/packages/telemetry/src/schemas.ts``, which adopted the flat shape
+    per the Pro README's "paired events use consistent layout" rule: every
+    *start* / *complete* pair exposes its primary fields at root level.
     """
 
+    type: Literal["tool_complete"] = "tool_complete"
     toolName: str
     success: bool | None = None
     durationMs: float | None = None
-
-    model_config = {"extra": "forbid"}
-
-
-class ToolCompleteEvent(OtterBase):
-    """Tool invocation completion with timing and success flag."""
-
-    type: Literal["tool_complete"] = "tool_complete"
-    payload: ToolCompletePayload
 
 
 class AgentInvokeStartEvent(OtterBase):
@@ -159,11 +155,18 @@ class AgentInvokeStartEvent(OtterBase):
 
 
 class AgentInvokeCompleteEvent(OtterBase):
-    """Sub-agent invocation completed."""
+    """Sub-agent invocation completed.
+
+    ``durationSec`` is **optional** — omitted when upstream metadata doesn't
+    carry timing information.  Defaulting to ``0.0`` when unknown would poison
+    downstream timing aggregations; ``None`` is the honest signal.  Matches
+    Pro's ``AgentInvokeCompleteSchema`` which declares ``durationSec`` as
+    ``.optional()``.
+    """
 
     type: Literal["agent_invoke_complete"] = "agent_invoke_complete"
     targetOtter: str
-    durationSec: float
+    durationSec: float | None = None
     success: bool
     model: str | None = None
 
@@ -214,7 +217,6 @@ __all__ = [
     "FileReadEvent",
     "FileWriteEvent",
     "ToolCallEvent",
-    "ToolCompletePayload",
     "ToolCompleteEvent",
     "AgentInvokeStartEvent",
     "AgentInvokeCompleteEvent",

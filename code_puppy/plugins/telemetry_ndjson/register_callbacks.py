@@ -6,14 +6,53 @@ every handler short-circuits after writer.is_enabled().
 
 ## Hook selection notes
 
-- ``invoke_agent`` is SKIPPED. Both ``invoke_agent`` and ``agent_run_start``
-  fire on sub-agent dispatch; ``agent_run_start`` carries the richer signature
-  (agent_name, model_name, session_id) and avoids double-emission.
-- ``file_permission`` handler is a SYNC function — the hook is triggered via
-  _trigger_callbacks_sync, so an async handler would need asyncio.run(), which
-  breaks when a running loop already exists. Sync is cleaner and correct here.
-- All handlers use ``(*args, **kwargs)`` defensive signatures for forward-compat
-  against upstream signature drift on rebase (per frontend_emitter pattern).
+### ``invoke_agent`` core hook — currently dead code
+
+The ``invoke_agent`` callback hook defined in ``code_puppy/callbacks.py``
+is **never triggered** anywhere in raft-puppy: no call to
+``_trigger_callbacks("invoke_agent", ...)`` exists in the codebase.
+Specifically, ``_invoke_agent_impl`` in
+``code_puppy/tools/subagent_invocation.py`` does NOT fire it.
+
+# TODO: A follow-up task should either wire ``_trigger_callbacks("invoke_agent",
+# ...)`` inside ``_invoke_agent_impl``, or remove the hook from callbacks.py
+# entirely as dead code.
+
+We deliberately do NOT subscribe to ``invoke_agent`` here.
+
+### ``agent_run_start`` / ``agent_run_end`` — top-level agent only
+
+``agent_run_start`` and ``agent_run_end`` (fired from
+``code_puppy/agents/_runtime.py``) only fire for the **top-level** agent run.
+They do NOT fire for sub-agents launched via ``invoke_agent`` /
+``invoke_agent_with_model``.
+
+### Sub-agent telemetry — plugin-side translation
+
+Sub-agent telemetry is synthesised here via ``pre_tool_call`` /
+``post_tool_call``: when ``tool_name in SUBAGENT_TOOLS``, the generic
+``tool_call`` / ``tool_complete`` events are suppressed and replaced by
+``agent_invoke_start`` / ``agent_invoke_complete`` events.  This matches the
+variant foreman emits on the Pro side per ADR-002.  ``targetOtter`` carries
+the sub-agent name; ``model`` carries any per-call model override.
+
+### ``STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES`` env var
+
+When set to ``1`` / ``true`` / ``yes`` / ``on`` (default **off**), the plugin
+additionally emits ``AgentResponseEvent`` carrying the sub-agent's ``.response``
+text after each ``agent_invoke_complete``.  Off by default because sub-agent
+responses can be very large and noisy in NDJSON logs.
+
+### ``file_permission`` — sync handler
+
+``file_permission`` handler is a SYNC function — the hook is triggered via
+``_trigger_callbacks_sync``, so an async handler would need ``asyncio.run()``,
+which breaks when a running loop already exists.  Sync is cleaner and correct.
+
+### Defensive ``(*args, **kwargs)`` signatures
+
+All handlers use ``(*args, **kwargs)`` defensive signatures for forward-compat
+against upstream signature drift on rebase (per frontend_emitter pattern).
 
 Structural twin: code_puppy/plugins/frontend_emitter/register_callbacks.py
 Bead: code_puppy-vbt
@@ -21,7 +60,9 @@ Bead: code_puppy-vbt
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from typing import Any
 
 from code_puppy.callbacks import register_callback
@@ -37,12 +78,15 @@ from code_puppy.plugins.telemetry_ndjson.otter_event import (
     ThinkingEvent,
     ToolCallEvent,
     ToolCompleteEvent,
-    ToolCompletePayload,
     next_seq,
     now_iso,
 )
 
 logger = logging.getLogger(__name__)
+
+# Tool names that represent sub-agent dispatches — translated to
+# agent_invoke_start / agent_invoke_complete instead of tool_call / tool_complete.
+SUBAGENT_TOOLS: frozenset[str] = frozenset({"invoke_agent", "invoke_agent_with_model"})
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +119,12 @@ def _is_successful_result(result: Any) -> bool:
 
 
 async def _on_pre_tool_call(*args: Any, **kwargs: Any) -> None:
-    """Emit ToolCallEvent before a tool executes."""
+    """Emit ToolCallEvent before a tool executes.
+
+    For sub-agent dispatch tools (``invoke_agent`` / ``invoke_agent_with_model``)
+    emits ``AgentInvokeStartEvent`` instead and suppresses the generic
+    ``ToolCallEvent`` to avoid double-counting on the Pro side.
+    """
     if not writer.is_enabled():
         return
     try:
@@ -83,6 +132,21 @@ async def _on_pre_tool_call(*args: Any, **kwargs: Any) -> None:
             kwargs.get("tool_name") or (args[0] if args else None) or "unknown"
         )
         tool_args_raw: Any = args[1] if len(args) > 1 else kwargs.get("tool_args")
+
+        if tool_name in SUBAGENT_TOOLS:
+            args_dict = tool_args_raw if isinstance(tool_args_raw, dict) else {}
+            target = args_dict.get("agent_name") or "unknown"
+            model = args_dict.get("model_name")
+            writer.emit(
+                AgentInvokeStartEvent(
+                    ts=now_iso(),
+                    seq=next_seq(),
+                    targetOtter=str(target),
+                    model=str(model) if model else None,
+                )
+            )
+            return  # Do NOT also emit ToolCallEvent for sub-agent dispatches.
+
         writer.emit(
             ToolCallEvent(
                 ts=now_iso(),
@@ -96,7 +160,14 @@ async def _on_pre_tool_call(*args: Any, **kwargs: Any) -> None:
 
 
 async def _on_post_tool_call(*args: Any, **kwargs: Any) -> None:
-    """Emit ToolCompleteEvent after a tool finishes."""
+    """Emit ToolCompleteEvent after a tool finishes (flat shape, no nested payload).
+
+    For sub-agent dispatch tools (``invoke_agent`` / ``invoke_agent_with_model``)
+    emits ``AgentInvokeCompleteEvent`` instead and suppresses the generic
+    ``ToolCompleteEvent`` to avoid double-counting on the Pro side.  Optionally
+    also emits ``AgentResponseEvent`` when
+    ``STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES`` is truthy.
+    """
     if not writer.is_enabled():
         return
     try:
@@ -109,15 +180,67 @@ async def _on_post_tool_call(*args: Any, **kwargs: Any) -> None:
         duration_ms: float | None = (
             float(duration_ms_raw) if duration_ms_raw is not None else None
         )
+
+        if tool_name in SUBAGENT_TOOLS:
+            # pydantic-ai's _call_tool serializes AgentInvokeOutput to a JSON string
+            # before returning. Deserialize so _get(result, "response") works.
+            # (beads swp-9pc0)
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except (json.JSONDecodeError, ValueError):
+                    pass  # leave as str; _get returns None gracefully
+
+            # result is an AgentInvokeOutput-like object or dict — handle both.
+            # NOTE: this branch ends with an explicit `return`, so the rebound
+            # `result` does not flow into _is_successful_result below.
+            def _get(obj: Any, key: str, default: Any = None) -> Any:
+                if obj is None:
+                    return default
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
+            target = _get(result, "agent_name") or "unknown"
+            error = _get(result, "error")
+            response_text = _get(result, "response")
+            model = _get(result, "model_name")
+
+            duration_sec: float | None = (
+                (duration_ms / 1000.0) if duration_ms is not None else None
+            )
+
+            writer.emit(
+                AgentInvokeCompleteEvent(
+                    ts=now_iso(),
+                    seq=next_seq(),
+                    targetOtter=str(target),
+                    success=error is None,
+                    durationSec=duration_sec,
+                    model=str(model) if model else None,
+                )
+            )
+
+            _responses_flag = os.environ.get(
+                "STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES"
+            )
+            if response_text and _responses_flag in ("1", "true", "yes", "on"):
+                writer.emit(
+                    AgentResponseEvent(
+                        ts=now_iso(),
+                        seq=next_seq(),
+                        text=str(response_text),
+                    )
+                )
+            return  # Skip generic tool_complete for sub-agent dispatches.
+
         writer.emit(
             ToolCompleteEvent(
                 ts=now_iso(),
                 seq=next_seq(),
-                payload=ToolCompletePayload(
-                    toolName=str(tool_name),
-                    success=_is_successful_result(result),
-                    durationMs=duration_ms,
-                ),
+                toolName=str(tool_name),
+                success=_is_successful_result(result),
+                durationMs=duration_ms,
             )
         )
     except Exception as e:
@@ -161,8 +284,10 @@ async def _on_agent_run_end(*args: Any, **kwargs: Any) -> None:
         response_text: Any = args[5] if len(args) > 5 else kwargs.get("response_text")
         metadata: Any = args[6] if len(args) > 6 else kwargs.get("metadata")
 
-        # Extract duration from metadata if the upstream supplies it
-        duration_sec: float = 0.0
+        # Extract duration from metadata if the upstream supplies it.
+        # None is the honest signal when timing is unavailable — fabricating
+        # 0.0 would poison downstream timing aggregations.
+        duration_sec: float | None = None
         if isinstance(metadata, dict):
             if "duration_sec" in metadata:
                 duration_sec = float(metadata["duration_sec"])
