@@ -19,8 +19,11 @@ Bead:
 ## Field naming convention
 
 camelCase field names mirror the Zod schema 1-to-1 so that JSON output is
-wire-compatible without alias plumbing. ``model_dump_json(by_alias=True)`` is
-a no-op here but callers should pass it anyway for forward-compat.
+wire-compatible without alias plumbing. The canonical serialization call is
+``model_dump_json(by_alias=True, exclude_none=True)``: ``by_alias=True`` is a
+no-op today but is kept for forward-compat, and ``exclude_none=True`` matches
+the TypeScript emitter, which omits absent optional fields rather than writing
+``null``.
 """
 
 from __future__ import annotations

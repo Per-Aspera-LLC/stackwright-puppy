@@ -6,6 +6,8 @@ All notable changes to this plugin follow [Keep a Changelog](https://keepachange
 
 ### Fixed
 
+- **Wire-format parity with TS emitter**: writer now calls `event.model_dump_json(by_alias=True, exclude_none=True)` so optional fields with `None` values (e.g. `phase`, `otter`, `timeoutSec`, `bytes`, `args`, `model`, `durationSec`) are omitted from NDJSON output instead of serialized as `null`. Matches the behavior of the TypeScript `@stackwright-pro/telemetry` emitter — downstream consumers were diverging on null-key presence. Pure addition: any consumer using `.get()` semantics is unaffected.
+
 - **Fix**: Deserialize JSON-string `result` in `_on_post_tool_call` so `AgentResponseEvent` actually fires when `STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES=1`. Pydantic-AI's `_call_tool` returns the sub-agent payload as a JSON string, which `getattr()` could not navigate. (beads `swp-9pc0`)
 
 ## [1.1.0] — Unreleased

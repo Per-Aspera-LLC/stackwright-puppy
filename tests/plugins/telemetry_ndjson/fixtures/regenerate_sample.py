@@ -56,7 +56,6 @@ def main() -> None:
         TokenUpdateEvent,
         ToolCallEvent,
         ToolCompleteEvent,
-        ToolCompletePayload,
         next_seq,
         now_iso,
     )
@@ -117,16 +116,14 @@ def main() -> None:
         )
     )
 
-    # 8. ToolCompleteEvent
+    # 8. ToolCompleteEvent (flat — ToolCompletePayload removed in v1.1.0)
     _e(
         ToolCompleteEvent(
             ts=now_iso(),
             seq=next_seq(),
-            payload=ToolCompletePayload(
-                toolName="cp_read_file",
-                success=True,
-                durationMs=12.5,
-            ),
+            toolName="cp_read_file",
+            success=True,
+            durationMs=12.5,
         )
     )
 

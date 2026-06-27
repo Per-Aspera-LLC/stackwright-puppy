@@ -48,7 +48,7 @@ def emit(event: OtterEvent) -> None:
     if _fh is None or _init_failed:
         return
     try:
-        line = event.model_dump_json(by_alias=True) + "\n"
+        line = event.model_dump_json(by_alias=True, exclude_none=True) + "\n"
         with _lock:
             _fh.write(line)
             _fh.flush()
