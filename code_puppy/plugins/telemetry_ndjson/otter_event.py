@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import itertools
 import threading
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Thread-safe monotonic sequence counter
@@ -55,6 +56,18 @@ def now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Run identity — stable UUID4 for this process lifetime (Finding 1: seq resets)
+# ---------------------------------------------------------------------------
+
+_RUN_ID: str = str(uuid.uuid4())
+
+
+def current_run_id() -> str:
+    """Return the unique run ID for this process invocation (stable until restart)."""
+    return _RUN_ID
+
+
+# ---------------------------------------------------------------------------
 # Base fields shared by every OtterEvent
 # ---------------------------------------------------------------------------
 
@@ -71,8 +84,26 @@ class OtterBase(BaseModel):
         default=None,
         description='Which otter emitted this (e.g. "foreman")',
     )
+    runId: str | None = Field(
+        default=None,
+        description="UUID4 identifying this process run; resets on restart (Finding 1)",
+    )
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _stamp_run_id(cls, data: Any) -> Any:
+        """Auto-stamp runId on every event at construction time if not already set.
+
+        Avoids sprinkling runId=current_run_id() on every writer.emit() call site.
+        Pydantic v2 model_validator(mode="before") runs on the raw input dict
+        before field validation — safe with extra="forbid" because runId is a
+        declared field, not an extra.
+        """
+        if isinstance(data, dict) and data.get("runId") is None:
+            data["runId"] = _RUN_ID
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +241,7 @@ __all__ = [
     # Helpers
     "next_seq",
     "now_iso",
+    "current_run_id",
     # Base
     "OtterBase",
     # Variants

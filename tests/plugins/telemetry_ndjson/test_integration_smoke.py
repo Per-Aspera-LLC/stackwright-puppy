@@ -294,7 +294,9 @@ def test_invoke_agent_complete_emits_agent_invoke_complete_not_tool_complete(
     )
 
     lines = ndjson_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1, f"expected 1 event (no response env var), got {len(lines)}"
+    # 2 events: agent_invoke_complete + token_update (per-subagent telemetry;
+    # response="hello" is non-empty so Option B fallback fires).
+    assert len(lines) == 2, f"expected 2 events (complete + token_update), got {len(lines)}"
 
     ev = json.loads(lines[0])
     assert ev["type"] == "agent_invoke_complete"
@@ -346,7 +348,8 @@ def test_invoke_agent_complete_handles_dict_result(reloaded_telemetry):
     asyncio.run(rc._on_post_tool_call("invoke_agent", {}, result, 1000.0))
 
     lines = ndjson_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
+    # 2 events: agent_invoke_complete + token_update (response="hello" triggers Option B).
+    assert len(lines) == 2
 
     ev = json.loads(lines[0])
     assert ev["type"] == "agent_invoke_complete"
@@ -373,8 +376,11 @@ def test_subagent_response_env_var_off_skips_response_event(
     asyncio.run(rc._on_post_tool_call("invoke_agent", {}, result, 100.0))
 
     lines = ndjson_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1, (
-        f"expected 1 event (complete only, no response), got {len(lines)}: {lines}"
+    # 2 events: agent_invoke_complete + token_update. AgentResponseEvent is suppressed
+    # (SUBAGENT_RESPONSES flag is off) but token telemetry always fires when response
+    # text is non-empty (Option B fallback).
+    assert len(lines) == 2, (
+        f"expected 2 events (complete + token_update, no response), got {len(lines)}: {lines}"
     )
     types = {json.loads(line)["type"] for line in lines}
     assert "agent_invoke_complete" in types
@@ -400,8 +406,10 @@ def test_subagent_response_env_var_on_emits_response_event(
     asyncio.run(rc._on_post_tool_call("invoke_agent", {}, result, 100.0))
 
     lines = ndjson_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2, (
-        f"expected 2 events (complete + response), got {len(lines)}: {lines}"
+    # 3 events: agent_invoke_complete, token_update, agent_response.
+    # token_update is emitted by per-subagent telemetry (Option B fallback on response text).
+    assert len(lines) == 3, (
+        f"expected 3 events (complete + token_update + response), got {len(lines)}: {lines}"
     )
 
     events = [json.loads(line) for line in lines]

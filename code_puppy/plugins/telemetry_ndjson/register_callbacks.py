@@ -6,17 +6,27 @@ every handler short-circuits after writer.is_enabled().
 
 ## Hook selection notes
 
-### ``invoke_agent`` core hook — currently dead code
+### ``invoke_agent`` core hook — upstream proposal, not used here
 
-The ``invoke_agent`` callback hook defined in ``code_puppy/callbacks.py``
-is **never triggered** anywhere in raft-puppy: no call to
-``_trigger_callbacks("invoke_agent", ...)`` exists in the codebase.
-Specifically, ``_invoke_agent_impl`` in
-``code_puppy/tools/subagent_invocation.py`` does NOT fire it.
+The ``invoke_agent`` callback hook defined upstream in
+``code_puppy/callbacks.py`` is **never triggered** anywhere in the codebase
+(no ``_trigger_callbacks("invoke_agent", ...)`` call exists). The same is
+true of ``agent_exception``.
 
-# TODO: A follow-up task should either wire ``_trigger_callbacks("invoke_agent",
-# ...)`` inside ``_invoke_agent_impl``, or remove the hook from callbacks.py
-# entirely as dead code.
+We considered wiring ``_trigger_callbacks("invoke_agent", ...)`` into
+``_invoke_agent_impl`` in ``code_puppy/tools/subagent_invocation.py``, but
+deliberately chose **not to**: it would be a core edit (forbidden by the
+golden rule in ``AGENTS.md`` and tracked in ``CHANGES_FROM_UPSTREAM.md``),
+and the ``pre_tool_call`` / ``post_tool_call`` interception of the
+``invoke_agent`` / ``invoke_agent_with_model`` tool names that this plugin
+already uses is strictly less invasive and gives equivalent observability.
+
+If upstream ever accepts the proposed wire-up, plugins can switch from the
+translation path below to direct ``invoke_agent`` subscription with no loss
+of fidelity (and the benefit of receiving the resolved ``session_id``
+directly instead of having to dig it out of the tool result). The full
+proposal — including suggested signature, call-site, and tests — lives at
+``docs/proposals/wire-invoke-agent-hook.md``.
 
 We deliberately do NOT subscribe to ``invoke_agent`` here.
 
@@ -63,6 +73,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from typing import Any
 
 from code_puppy.callbacks import register_callback
@@ -76,6 +87,7 @@ from code_puppy.plugins.telemetry_ndjson.otter_event import (
     ReasoningDumpEvent,
     ShellCommandEvent,
     ThinkingEvent,
+    TokenUpdateEvent,
     ToolCallEvent,
     ToolCompleteEvent,
     next_seq,
@@ -113,6 +125,64 @@ def _is_successful_result(result: Any) -> bool:
     return True
 
 
+def _current_otter() -> str | None:
+    """Return the currently active sub-agent's name, or None if at top-level.
+
+    Used to populate the ``otter`` field on emitted events — i.e. the otter
+    that *emitted* the event (the caller / current runtime context). Reads
+    from ``code_puppy.tools.subagent_context``'s ContextVar, which raft-puppy
+    core sets via ``with subagent_context(agent_name):`` around every
+    sub-agent invocation in ``code_puppy/tools/subagent_invocation.py``.
+    ContextVars propagate through async tasks, so this is the correct way to
+    discover sub-agent identity inside ``pre_tool_call`` / ``post_tool_call``
+    handlers that receive no explicit ``context`` argument from core.
+
+    Returns ``None`` at the top level. Top-level events leave the ``otter``
+    field unset, which (with ``exclude_none=True`` on the writer) omits the
+    key entirely from NDJSON output.
+    """
+    try:
+        from code_puppy.tools.subagent_context import get_subagent_name
+
+        return get_subagent_name()
+    except Exception:
+        return None
+
+
+# Thinking/reasoning accumulator: (session_id, part_index) → {text, kind}
+_part_accumulator: dict[tuple[str | None, int], dict[str, str]] = {}
+_accum_lock = threading.Lock()
+
+# Monotonic session counter; shared by foreman + per-subagent TokenUpdateEvent paths.
+_cumulative_output_tokens: int = 0
+_cumulative_lock = threading.Lock()
+
+
+def _bump_and_emit_token_update(output_tokens: int, otter: str | None = None) -> None:
+    """Bump monotonic token counter and emit TokenUpdateEvent. Shared by foreman + subagent paths."""
+    global _cumulative_output_tokens  # noqa: PLW0603
+    with _cumulative_lock:
+        _cumulative_output_tokens += int(output_tokens)
+        used = _cumulative_output_tokens
+    try:
+        from code_puppy.config import get_protected_token_count
+
+        total: int = int(get_protected_token_count() or 200_000)
+    except Exception:
+        total = 200_000
+    total = total or 200_000
+    writer.emit(
+        TokenUpdateEvent(
+            ts=now_iso(),
+            seq=next_seq(),
+            otter=otter,
+            used=used,
+            total=total,
+            percentUsed=used / total * 100.0,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Hook handlers
 # ---------------------------------------------------------------------------
@@ -133,6 +203,10 @@ async def _on_pre_tool_call(*args: Any, **kwargs: Any) -> None:
         )
         tool_args_raw: Any = args[1] if len(args) > 1 else kwargs.get("tool_args")
 
+        # Task 4: normalize {"raw": ""} → None (MCP no-args sentinel from pydantic_patches.py)
+        if isinstance(tool_args_raw, dict) and tool_args_raw == {"raw": ""}:
+            tool_args_raw = None
+
         if tool_name in SUBAGENT_TOOLS:
             args_dict = tool_args_raw if isinstance(tool_args_raw, dict) else {}
             target = args_dict.get("agent_name") or "unknown"
@@ -142,6 +216,7 @@ async def _on_pre_tool_call(*args: Any, **kwargs: Any) -> None:
                     ts=now_iso(),
                     seq=next_seq(),
                     targetOtter=str(target),
+                    otter=_current_otter(),
                     model=str(model) if model else None,
                 )
             )
@@ -151,6 +226,7 @@ async def _on_pre_tool_call(*args: Any, **kwargs: Any) -> None:
             ToolCallEvent(
                 ts=now_iso(),
                 seq=next_seq(),
+                otter=_current_otter(),
                 toolName=str(tool_name),
                 args=tool_args_raw if isinstance(tool_args_raw, dict) else None,
             )
@@ -215,11 +291,38 @@ async def _on_post_tool_call(*args: Any, **kwargs: Any) -> None:
                     ts=now_iso(),
                     seq=next_seq(),
                     targetOtter=str(target),
+                    otter=_current_otter(),
                     success=error is None,
                     durationSec=duration_sec,
                     model=str(model) if model else None,
                 )
             )
+
+            # Per-sub-agent token telemetry (Option A → B fallback).
+            # A: SubAgentConsoleManager.token_count (live-counted by subagent_stream_handler).
+            # B: estimate from response text length (~chars/2.5, same heuristic as elsewhere).
+            _sub_tokens: int = 0
+            try:
+                _sub_sid = _get(result, "session_id")
+                if _sub_sid:
+                    from code_puppy.messaging.subagent_console import (
+                        SubAgentConsoleManager,
+                    )
+
+                    _sub_state = SubAgentConsoleManager.get_instance().get_agent_state(
+                        str(_sub_sid)
+                    )
+                    if _sub_state and _sub_state.token_count > 0:
+                        _sub_tokens = int(_sub_state.token_count)
+            except Exception as _te:
+                logger.debug("telemetry_ndjson: subagent token lookup: %s", _te)
+            if _sub_tokens == 0 and response_text:
+                _sub_tokens = max(1, int(len(str(response_text)) / 2.5))
+            if _sub_tokens > 0:
+                try:
+                    _bump_and_emit_token_update(_sub_tokens, otter=str(target))
+                except Exception as _te:
+                    logger.warning("telemetry_ndjson: subagent token emit: %s", _te)
 
             _responses_flag = os.environ.get(
                 "STACKWRIGHT_TELEMETRY_NDJSON_SUBAGENT_RESPONSES"
@@ -229,6 +332,7 @@ async def _on_post_tool_call(*args: Any, **kwargs: Any) -> None:
                     AgentResponseEvent(
                         ts=now_iso(),
                         seq=next_seq(),
+                        otter=str(target),
                         text=str(response_text),
                     )
                 )
@@ -238,6 +342,7 @@ async def _on_post_tool_call(*args: Any, **kwargs: Any) -> None:
             ToolCompleteEvent(
                 ts=now_iso(),
                 seq=next_seq(),
+                otter=_current_otter(),
                 toolName=str(tool_name),
                 success=_is_successful_result(result),
                 durationMs=duration_ms,
@@ -270,16 +375,19 @@ async def _on_agent_run_start(*args: Any, **kwargs: Any) -> None:
 
 
 async def _on_agent_run_end(*args: Any, **kwargs: Any) -> None:
-    """Emit AgentInvokeCompleteEvent (and optionally AgentResponseEvent) when done."""
+    """Emit AgentInvokeCompleteEvent, optional AgentResponseEvent, and TokenUpdateEvent."""
     if not writer.is_enabled():
         return
+
+    # Unpack early so both try blocks below can reference these without re-deriving.
+    agent_name: str = (
+        kwargs.get("agent_name") or (args[0] if args else None) or "unknown"
+    )
+    model_name: Any = args[1] if len(args) > 1 else kwargs.get("model_name")
+
     try:
         # positional order: agent_name, model_name, session_id, success,
         #                   error, response_text, metadata
-        agent_name: str = (
-            kwargs.get("agent_name") or (args[0] if args else None) or "unknown"
-        )
-        model_name: Any = args[1] if len(args) > 1 else kwargs.get("model_name")
         success_raw: Any = args[3] if len(args) > 3 else kwargs.get("success", True)
         response_text: Any = args[5] if len(args) > 5 else kwargs.get("response_text")
         metadata: Any = args[6] if len(args) > 6 else kwargs.get("metadata")
@@ -316,55 +424,91 @@ async def _on_agent_run_end(*args: Any, **kwargs: Any) -> None:
     except Exception as e:
         logger.warning("telemetry_ndjson: _on_agent_run_end failed: %s", e)
 
+    # Foreman token telemetry — best-effort; separate try to never suppress above.
+    try:
+        from code_puppy.agents.run_stats import AgentRunStats
+
+        cycle_tokens = AgentRunStats.get_last_cycle_stats().get("output_tokens", 0) or 0
+        if cycle_tokens > 0:
+            _bump_and_emit_token_update(cycle_tokens, otter=str(agent_name))
+    except Exception as e:
+        logger.warning("telemetry_ndjson: token update failed: %s", e)
+
 
 async def _on_stream_event(*args: Any, **kwargs: Any) -> None:
-    """Emit ThinkingEvent or ReasoningDumpEvent from streaming parts.
+    """Accumulate thinking/reasoning deltas; emit ThinkingEvent/ReasoningDumpEvent on part_end.
 
-    Per-token deltas (objects with content_delta) are silently skipped —
-    we don't accumulate per-token in Phase 3. Part-wrapper events are
-    unwrapped to their inner part before duck-typing. Ambiguous events
-    that don't match known Thinking/Reasoning type names are logged at
-    DEBUG and skipped (never emit raw_log per ADR-002 §3).
+    part_start → seed accumulator for ThinkingPart/ReasoningPart (others skipped).
+    part_delta → append content_delta to slot. part_end → pop and emit full text.
+    Non-dict event_data silently ignored. Never emits raw_log per ADR-002 §3.
     """
     if not writer.is_enabled():
         return
     try:
+        event_type: str = args[0] if args else kwargs.get("event_type", "")
         event_data: Any = args[1] if len(args) > 1 else kwargs.get("event_data")
+        agent_session_id: Any = (
+            args[2] if len(args) > 2 else kwargs.get("agent_session_id")
+        )
+        emitter_otter = str(agent_session_id) if agent_session_id else _current_otter()
 
-        # Per-token deltas — skip, no accumulation in Phase 3
-        if hasattr(event_data, "content_delta"):
+        if not isinstance(event_data, dict):
+            # Legacy raw pydantic-ai objects: not handled in Phase 4
             return
 
-        # Unwrap PartStartEvent / PartEndEvent to access the inner part
-        inner = event_data
-        if hasattr(event_data, "part"):
-            inner = event_data.part
+        key: tuple[str | None, int] = (
+            str(agent_session_id) if agent_session_id else None,
+            int(event_data.get("index", -1)),
+        )
 
-        type_name = type(inner).__name__
+        if event_type == "part_start":
+            part_type: str = event_data.get("part_type", "")
+            if "Thinking" in part_type:
+                kind: str = "thinking"
+            elif "Reasoning" in part_type:
+                kind = "reasoning"
+            else:
+                return  # ToolCallPart / TextPart / etc — skip
+            seed: str = event_data.get("content") or ""
+            with _accum_lock:
+                _part_accumulator[key] = {"text": seed, "kind": kind}
 
-        # Extract text from the most common attribute names
-        text: str | None = None
-        for attr in ("content", "text"):
-            val = getattr(inner, attr, None)
-            if isinstance(val, str) and val:
-                text = val
-                break
+        elif event_type == "part_delta":
+            delta_type: str = event_data.get("delta_type", "")
+            is_thinking_delta = "Thinking" in delta_type or "Reasoning" in delta_type
+            content_delta: str = event_data.get("content_delta") or ""
+            if not content_delta:
+                return
+            with _accum_lock:
+                slot = _part_accumulator.get(key)
+                if slot is not None:
+                    slot["text"] += content_delta
+                elif is_thinking_delta:
+                    # Delta arrived before start (rare) — create opportunistically
+                    opp_kind = "reasoning" if "Reasoning" in delta_type else "thinking"
+                    _part_accumulator[key] = {"text": content_delta, "kind": opp_kind}
 
-        if text is None:
-            logger.debug(
-                "telemetry_ndjson: stream_event %s has no extractable text — skipping",
-                type_name,
-            )
-            return
-
-        if "Thinking" in type_name:
-            writer.emit(ThinkingEvent(ts=now_iso(), seq=next_seq(), text=text))
-        elif "Reasoning" in type_name:
-            writer.emit(ReasoningDumpEvent(ts=now_iso(), seq=next_seq(), text=text))
+        elif event_type == "part_end":
+            with _accum_lock:
+                slot = _part_accumulator.pop(key, None)
+            if not slot or not slot.get("text"):
+                return  # Empty or no accumulator entry — skip
+            text: str = slot["text"]
+            if slot["kind"] == "thinking":
+                writer.emit(
+                    ThinkingEvent(
+                        ts=now_iso(), seq=next_seq(), otter=emitter_otter, text=text
+                    )
+                )
+            else:
+                writer.emit(
+                    ReasoningDumpEvent(
+                        ts=now_iso(), seq=next_seq(), otter=emitter_otter, text=text
+                    )
+                )
         else:
             logger.debug(
-                "telemetry_ndjson: stream_event type %s is ambiguous — skipping",
-                type_name,
+                "telemetry_ndjson: unknown stream event_type %r — skipping", event_type
             )
     except Exception as e:
         logger.warning("telemetry_ndjson: _on_stream_event failed: %s", e)
@@ -382,6 +526,7 @@ async def _on_run_shell_command(*args: Any, **kwargs: Any) -> None:
             ShellCommandEvent(
                 ts=now_iso(),
                 seq=next_seq(),
+                otter=_current_otter(),
                 command=str(command) if command else "",
                 timeoutSec=int(timeout_raw) if timeout_raw is not None else None,
             )
@@ -414,11 +559,21 @@ def _on_file_permission(*args: Any, **kwargs: Any) -> bool:
 
         if op == "read":
             writer.emit(
-                FileReadEvent(ts=now_iso(), seq=next_seq(), path=str(file_path))
+                FileReadEvent(
+                    ts=now_iso(),
+                    seq=next_seq(),
+                    otter=_current_otter(),
+                    path=str(file_path),
+                )
             )
         elif op in ("write", "edit", "delete"):
             writer.emit(
-                FileWriteEvent(ts=now_iso(), seq=next_seq(), path=str(file_path))
+                FileWriteEvent(
+                    ts=now_iso(),
+                    seq=next_seq(),
+                    otter=_current_otter(),
+                    path=str(file_path),
+                )
             )
         else:
             logger.debug("telemetry_ndjson: unknown file operation %r — skipping", op)

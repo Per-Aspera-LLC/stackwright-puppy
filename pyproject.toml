@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stackwright-puppy"
-version = "0.0.575.post2"
+version = "0.0.575.post6"
 description = "Stackwright-patched fork of code-puppy (MIT). Upstream: https://github.com/mpfaffenberger/code_puppy"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
