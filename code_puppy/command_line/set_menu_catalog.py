@@ -40,6 +40,7 @@ from code_puppy.config import (
     get_http2,
     get_max_hook_retries,
     get_max_saved_sessions,
+    get_max_turn_replay_attempts,
     get_mcp_disabled,
     get_mcp_unbound_warning_silenced,
     get_message_limit,
@@ -437,6 +438,18 @@ _HOOKS = SettingsCategory(
             description="Maximum plugin hook retries after an agent run before giving up.",
             type_hint="int",
             effective_getter=get_max_hook_retries,
+        ),
+        Setting(
+            key="max_turn_replay_attempts",
+            display_name="Max Turn Replay Attempts",
+            description=(
+                "Total cap on mid-stream replay attempts for a single turn, "
+                "tracked across all follow-up calls (independent of each "
+                "call's own retry streak). Terminates the turn with a clear "
+                "error once exceeded."
+            ),
+            type_hint="int",
+            effective_getter=get_max_turn_replay_attempts,
         ),
     ),
 )

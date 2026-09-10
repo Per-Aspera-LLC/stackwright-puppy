@@ -171,6 +171,29 @@ def get_max_hook_retries() -> int:
         return 3
 
 
+def get_max_turn_replay_attempts() -> int:
+    """Return the TOTAL cap on mid-stream replay attempts for a single turn.
+
+    ``streaming_retry()`` already caps each individual call (initial run,
+    each queued-steer follow-up, each hook-retry follow-up) at a handful of
+    attempts, resetting that per-call "streak" back to zero every time a new
+    call starts. That per-call reset means a turn that keeps getting
+    reinterrupted mid-stream across many follow-up calls has no overall
+    ceiling (swp-ufba: 48 replay attempts observed over ~2h with no total
+    cap terminating the loop). This cap is tracked across the *entire* turn,
+    independent of any per-call streak counter, and terminates the turn with
+    a clear error once exceeded. Defaults to 8.
+    """
+    val = get_value("max_turn_replay_attempts")
+    if val is None:
+        return 8
+    try:
+        n = int(val)
+        return max(1, n)  # At least 1 to avoid nonsensical values
+    except (ValueError, TypeError):
+        return 8
+
+
 def get_enable_streaming() -> bool:
     """
     Get the enable_streaming configuration value.
@@ -348,6 +371,8 @@ def get_config_keys():
     default_keys.append("enable_universal_constructor")
     # Add hook retry limit key
     default_keys.append("max_hook_retries")
+    # Add total per-turn mid-stream replay attempt cap key (swp-ufba)
+    default_keys.append("max_turn_replay_attempts")
     # Add streaming control key
     default_keys.append("enable_streaming")
     # Add suppress directory listing key

@@ -21,6 +21,8 @@ import signal
 import threading
 import uuid
 from contextlib import AsyncExitStack
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence, Type, Union
 
 import httpcore
@@ -80,6 +82,7 @@ from code_puppy.callbacks import (
 from code_puppy.config import (
     get_enable_streaming,
     get_max_hook_retries,
+    get_max_turn_replay_attempts,
     get_message_limit,
 )
 from code_puppy.keymap import cancel_agent_uses_signal
@@ -170,6 +173,60 @@ def should_retry_streaming(exc: Exception) -> bool:
     return False
 
 
+class TurnReplayLimitExceeded(RuntimeError):
+    """Raised when a turn's TOTAL mid-stream replay attempts exceed the cap.
+
+    Distinct from any transient-connection exception on purpose: this must
+    never be classified as retryable (see ``should_retry_streaming`` /
+    ``_render_turn_exception`` in cli_runner.py), so it always surfaces as a
+    clear, terminal error instead of the "re-run your prompt" friendly
+    one-liner reserved for genuine transient blips.
+    """
+
+
+@dataclass
+class _TurnReplayBudget:
+    """Tracks TOTAL mid-stream replay attempts across an entire turn.
+
+    ``streaming_retry()`` resets its own ``attempt`` counter to zero every
+    time it wraps a fresh call (the initial run, each queued-steer
+    follow-up, each hook-retry follow-up) — that per-call "streak" is by
+    design (each call deserves its own short burst of retries). What was
+    missing (swp-ufba) is a ceiling on the TOTAL across all of those calls
+    combined, so a turn that keeps getting reinterrupted mid-stream across
+    many follow-ups never terminates. This budget is that ceiling.
+    """
+
+    cap: int
+    used: int = 0
+
+    def bump_and_check(self) -> None:
+        """Increment the total-attempt counter; raise once the cap is hit."""
+        self.used += 1
+        if self.used > self.cap:
+            emit_error(
+                f"\u274c Turn exceeded its total mid-stream replay cap "
+                f"({self.cap} attempts across this turn) — stopping instead "
+                "of continuing to re-run. This is independent of any single "
+                "call's own retry count; configure via "
+                "puppy.cfg [puppy] max_turn_replay_attempts."
+            )
+            raise TurnReplayLimitExceeded(
+                f"Turn exceeded max_turn_replay_attempts ({self.cap}); "
+                "stopping instead of looping indefinitely."
+            )
+
+
+# Set once per turn in ``_do_run``; consulted (and incremented) by every
+# ``streaming_retry``-wrapped call made during that turn, however many
+# follow-up calls the turn ends up making. ``None`` outside of a turn (e.g.
+# direct unit-test calls to a ``streaming_retry``-wrapped function) — in that
+# case there is no total-cap enforcement, matching pre-existing behavior.
+_turn_replay_budget: ContextVar[Optional[_TurnReplayBudget]] = ContextVar(
+    "_turn_replay_budget", default=None
+)
+
+
 def streaming_retry(
     max_attempts: int = 3,
     delays: Sequence[float] = (1, 2, 4),
@@ -180,6 +237,9 @@ def streaming_retry(
         async def runner() -> Any:
             last_exc: Optional[Exception] = None
             for attempt in range(max_attempts):
+                budget = _turn_replay_budget.get()
+                if budget is not None:
+                    budget.bump_and_check()  # raises TurnReplayLimitExceeded if over cap
                 try:
                     return await factory()
                 except Exception as exc:
@@ -355,6 +415,12 @@ async def run_with_mcp(
 
     async def _do_run(prompt_to_use: Any) -> Any:
         """Run the agent once, then honour any plugin ``retry`` requests."""
+        # Fresh per-turn replay budget (swp-ufba): every call to _do_run is a
+        # new turn (main or sub-agent), so always install a brand-new budget
+        # here rather than reuse whatever the ContextVar held before — that
+        # keeps consecutive turns in a long-lived REPL session, and nested
+        # sub-agent turns, from inheriting a stale/exhausted counter.
+        _turn_replay_budget.set(_TurnReplayBudget(cap=get_max_turn_replay_attempts()))
         usage_limits = UsageLimits(request_limit=get_message_limit())
 
         # Streaming config gate (issue #295). When streaming is disabled we
