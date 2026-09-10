@@ -2,6 +2,43 @@
 
 All notable changes to this plugin follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — swp-g2xp emit-side otter-identity fix (code-puppy-1c868d)
+
+### Fixed
+
+- **`otter` field on `ThinkingEvent`/`ReasoningDumpEvent` carried a session
+  id, not the agent identity (swp-g2xp, Phase B of the otter-viz@dcac16c
+  cross-reference).** `_on_stream_event`'s `emitter_otter` computation
+  preferred `agent_session_id` (the `code_puppy.messaging` session-routing
+  id, set by `subagent_invocation.py`'s `set_session_context()` around
+  *every* `invoke_agent`/`invoke_agent_with_model` call) over
+  `_current_otter()` (the `subagent_context` ContextVar — the actual agent
+  name, set by the very same call site). Since a session id is set for
+  essentially every sub-agent stream event, the correct `_current_otter()`
+  fallback almost never actually ran for thinking/reasoning events, while
+  every other handler in this module (`_on_pre_tool_call`,
+  `_on_run_shell_command`, `_on_file_permission`, ...) already used
+  `_current_otter()` exclusively and was unaffected — hence one regressed
+  spawn path (session-id-bearing stream events) and one correct path
+  (everything else) coexisting in the same NDJSON stream. A caller-supplied
+  session id of the literal string `"null"` (observed from an upstream
+  caller that appears to build the id via a JS template literal on a
+  missing/undefined agent name) produced the worst-case `"null-<hex>"`
+  form once stringified and hash-suffixed.
+
+  Fix: `emitter_otter` now always resolves via `_current_otter()`, matching
+  every sibling handler. `agent_session_id` is unchanged as the
+  `_part_accumulator` disambiguation key (that use is legitimate — it
+  disambiguates concurrent sub-agent streams — it was only wrong as an
+  *identity* substitute). `_current_otter()` also gained defensive
+  normalization: an empty/whitespace name or the literal `"none"`/`"null"`/
+  `"undefined"` (any casing) now resolves to `None` (field omitted via
+  `exclude_none=True`) instead of leaking a sentinel string onto the wire.
+  Not upstream-adoption related — this plugin is 100% fork-native code
+  (never existed upstream), introduced by this same plugin's own Finding-2
+  fix (`_on_stream_event`'s delta-accumulator rewrite) earlier in this
+  changelog, not by anything absorbed from `mpfaffenberger/code_puppy`.
+
 ## [Unreleased] — tightening pass (planning-agent-13d2f9)
 
 ### Fixed

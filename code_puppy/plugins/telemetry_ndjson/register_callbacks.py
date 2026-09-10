@@ -144,9 +144,19 @@ def _current_otter() -> str | None:
     try:
         from code_puppy.tools.subagent_context import get_subagent_name
 
-        return get_subagent_name()
+        name = get_subagent_name()
     except Exception:
         return None
+    if name is None:
+        return None
+    # Defensive normalization (swp-g2xp): never let a degenerate sentinel
+    # (empty/whitespace, or the literal "none"/"null"/"undefined" — e.g. a
+    # JS template literal stringifying a missing agent name before it ever
+    # reaches this ContextVar) leak into telemetry as a fake identity.
+    stripped = name.strip()
+    if not stripped or stripped.lower() in ("none", "null", "undefined"):
+        return None
+    return name
 
 
 # Thinking/reasoning accumulator: (session_id, part_index) → {text, kind}
@@ -450,7 +460,22 @@ async def _on_stream_event(*args: Any, **kwargs: Any) -> None:
         agent_session_id: Any = (
             args[2] if len(args) > 2 else kwargs.get("agent_session_id")
         )
-        emitter_otter = str(agent_session_id) if agent_session_id else _current_otter()
+        # swp-g2xp root cause: this used to prefer `agent_session_id` (a
+        # session/routing identifier from code_puppy.messaging's session
+        # context) over the actual agent identity, so any sub-agent run with
+        # a session id set (every invoke_agent/invoke_agent_with_model call —
+        # see tools/subagent_invocation.py) stamped `otter` with a kebab
+        # session-id ("<name>-session-<hex>" or a caller-supplied session-id
+        # base like "domain-expert-baserow-r6-<hex>") instead of the clean
+        # agent name, and a session id of literal "null" (e.g. an upstream
+        # caller building it via a JS template literal on a missing agent
+        # name) produced the "null-<hex>" form entirely. `agent_session_id`
+        # is still the right key for `_part_accumulator` below (it
+        # legitimately needs to disambiguate concurrent sub-agent streams),
+        # but identity must ALWAYS come from `_current_otter()` — the
+        # `subagent_context` ContextVar — same as every other handler in
+        # this module (`_on_pre_tool_call`, `_on_run_shell_command`, etc.).
+        emitter_otter = _current_otter()
 
         if not isinstance(event_data, dict):
             # Legacy raw pydantic-ai objects: not handled in Phase 4

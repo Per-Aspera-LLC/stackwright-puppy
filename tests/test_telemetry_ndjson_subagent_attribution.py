@@ -295,3 +295,166 @@ def test_agent_invoke_start_nested_stamps_both():
     assert event.otter == "designer-otter", (
         f"Expected otter='designer-otter' (caller/nesting parent), got {event.otter!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. swp-g2xp regression: _on_stream_event must stamp otter with the agent
+#    NAME (subagent_context), never the session id — spawn path A (the
+#    invoke_agent/invoke_agent_with_model path, which always has a session id
+#    set via set_session_context() alongside subagent_context()).
+# ---------------------------------------------------------------------------
+
+
+def _emit_thinking_cycle(rc, agent_session_id):
+    """Drive a minimal part_start -> part_delta -> part_end thinking cycle.
+
+    Mirrors the real stream: part_start seeds the accumulator, part_delta
+    appends text, part_end flushes and emits ThinkingEvent. Returns the list
+    of emitted events captured by the caller's patch.
+    """
+    asyncio.run(
+        rc._on_stream_event(
+            "part_start", {"part_type": "ThinkingPart", "content": ""}, agent_session_id
+        )
+    )
+    asyncio.run(
+        rc._on_stream_event(
+            "part_delta",
+            {"delta_type": "ThinkingPartDelta", "content_delta": "hmm"},
+            agent_session_id,
+        )
+    )
+    asyncio.run(rc._on_stream_event("part_end", {}, agent_session_id))
+
+
+def test_stream_event_inside_subagent_with_session_id_stamps_agent_name():
+    """The swp-g2xp regression case: a session id is ALSO set (as it always is
+    for real invoke_agent calls — subagent_invocation.py calls
+    set_session_context() right alongside subagent_context()), but the
+    emitted ThinkingEvent.otter must be the agent NAME, never the kebab
+    session id, regardless of what that session id looks like.
+    """
+    import code_puppy.plugins.telemetry_ndjson.register_callbacks as rc
+
+    emitted: list = []
+    with (
+        patch(
+            "code_puppy.plugins.telemetry_ndjson.writer.emit",
+            side_effect=emitted.append,
+        ),
+        patch(
+            "code_puppy.plugins.telemetry_ndjson.writer.is_enabled",
+            return_value=True,
+        ),
+        subagent_context("domain-expert"),
+    ):
+        # A caller-supplied session id shaped exactly like the regressed
+        # form seen in production: agent-short-name + run-name + hex.
+        _emit_thinking_cycle(rc, "domain-expert-baserow-r6-55ef3b")
+
+    thinking_events = [e for e in emitted if e.type == "thinking"]
+    assert len(thinking_events) == 1, (
+        f"Expected 1 ThinkingEvent, got {len(thinking_events)}. "
+        f"All emitted types: {[e.type for e in emitted]}"
+    )
+    assert thinking_events[0].otter == "domain-expert", (
+        f"Expected otter='domain-expert' (agent name), got "
+        f"{thinking_events[0].otter!r} — session id leaked into identity field"
+    )
+
+
+def test_stream_event_top_level_with_session_id_omits_otter():
+    """Even at the top level, a stray session id must never become the otter.
+
+    No subagent_context here (top-level foreman), but a session id happens
+    to be set (e.g. leftover session-routing state). otter must be None/
+    absent, not the session id.
+    """
+    import code_puppy.plugins.telemetry_ndjson.register_callbacks as rc
+
+    emitted: list = []
+    with (
+        patch(
+            "code_puppy.plugins.telemetry_ndjson.writer.emit",
+            side_effect=emitted.append,
+        ),
+        patch(
+            "code_puppy.plugins.telemetry_ndjson.writer.is_enabled",
+            return_value=True,
+        ),
+    ):
+        _emit_thinking_cycle(rc, "some-session-id-abc123")
+
+    thinking_events = [e for e in emitted if e.type == "thinking"]
+    assert len(thinking_events) == 1
+    assert thinking_events[0].otter is None, (
+        f"Expected otter=None at top level, got {thinking_events[0].otter!r}"
+    )
+    json_str = thinking_events[0].model_dump_json(by_alias=True, exclude_none=True)
+    assert "otter" not in json_str, (
+        f"otter must be absent from JSON for top-level events; got: {json_str}"
+    )
+
+
+def test_stream_event_name_unavailable_never_emits_null_sentinel():
+    """swp-g2xp worst-case form ('null-<hex>'): when the agent name itself is
+    unavailable/degenerate (the caller lost it upstream and only a literal
+    "null" sentinel survived into subagent_context), _current_otter() must
+    normalize to None rather than let "null" (or "none"/"undefined", any
+    casing) leak onto the wire as a fake identity.
+    """
+    import code_puppy.plugins.telemetry_ndjson.register_callbacks as rc
+
+    for sentinel in ("null", "None", "NULL", "undefined", "  ", ""):
+        emitted: list = []
+        with (
+            patch(
+                "code_puppy.plugins.telemetry_ndjson.writer.emit",
+                side_effect=emitted.append,
+            ),
+            patch(
+                "code_puppy.plugins.telemetry_ndjson.writer.is_enabled",
+                return_value=True,
+            ),
+            subagent_context(sentinel),
+        ):
+            # Session id shaped like the observed worst-case ("null-<hex>")
+            # must NOT leak in either — otter must resolve to None either way.
+            _emit_thinking_cycle(rc, "null-372791")
+
+        thinking_events = [e for e in emitted if e.type == "thinking"]
+        assert len(thinking_events) == 1
+        assert thinking_events[0].otter is None, (
+            f"sentinel {sentinel!r}: expected otter=None, got "
+            f"{thinking_events[0].otter!r}"
+        )
+
+
+def test_stream_event_inside_subagent_no_session_id_still_stamps_agent_name():
+    """Spawn path B (e.g. wiggum/judge.py's `subagent_context(f\"judge:{name}\")`
+    without a matching set_session_context() call): agent_session_id is None,
+    so the pre-fix code already fell back to _current_otter() correctly. This
+    locks that this path stays correct after the fix (both paths now go
+    through the same _current_otter() call unconditionally).
+    """
+    import code_puppy.plugins.telemetry_ndjson.register_callbacks as rc
+
+    emitted: list = []
+    with (
+        patch(
+            "code_puppy.plugins.telemetry_ndjson.writer.emit",
+            side_effect=emitted.append,
+        ),
+        patch(
+            "code_puppy.plugins.telemetry_ndjson.writer.is_enabled",
+            return_value=True,
+        ),
+        subagent_context("judge:goal-judge"),
+    ):
+        _emit_thinking_cycle(rc, None)
+
+    thinking_events = [e for e in emitted if e.type == "thinking"]
+    assert len(thinking_events) == 1
+    assert thinking_events[0].otter == "judge:goal-judge", (
+        f"Expected otter='judge:goal-judge', got {thinking_events[0].otter!r}"
+    )
