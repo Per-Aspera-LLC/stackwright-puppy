@@ -28,6 +28,39 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# swp-erq2: distinguishing terminal auth failures from transient ones
+# ---------------------------------------------------------------------------
+
+
+class CopilotAuthRevokedError(RuntimeError):
+    """Raised when the GitHub OAuth token is confirmed revoked/invalid (401).
+
+    Before this, ``exchange_for_session_token``/``get_valid_session_token``
+    returned a bare ``None`` for EVERY failure mode alike — a revoked token
+    (permanent, no amount of retrying helps) was indistinguishable from a
+    transient timeout or a flaky connection (worth retrying). Callers had no
+    way to tell "stop retrying, the credential is dead" from "try again in a
+    bit", so a revoked token mid-run could silently retry/stall instead of
+    failing fast with an actionable message.
+
+    Carries ``status_code = 401`` (class attribute) so it flows through the
+    SAME terminal-classification path as any other provider's 401:
+    ``should_retry_streaming`` in ``agents/_runtime.py`` (never retryable)
+    and ``cli_runner._render_turn_exception``'s "re-run auth" hint — no
+    special-casing needed at either of those call sites for this plugin.
+    """
+
+    status_code = 401
+
+    def __init__(self, host: str):
+        self.host = host
+        super().__init__(
+            f"GitHub Copilot OAuth token for '{host}' was rejected (401) — "
+            "it looks revoked or expired. Run /copilot-login to re-authenticate."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Token storage — persisted tokens obtained via the Device Flow
 # ---------------------------------------------------------------------------
 
@@ -269,8 +302,11 @@ def exchange_for_session_token(
             logger.warning("Token endpoint returned 200 but no 'token' field")
         elif resp.status_code == 401:
             logger.warning(
-                "Copilot token exchange returned 401 — OAuth token may be revoked."
+                "Copilot token exchange returned 401 — OAuth token is revoked "
+                "or invalid; raising CopilotAuthRevokedError (terminal, not "
+                "retryable) instead of returning None."
             )
+            raise CopilotAuthRevokedError(host)
         else:
             logger.warning(
                 "Copilot token exchange failed: %s %s",
@@ -279,6 +315,11 @@ def exchange_for_session_token(
             )
     except requests.exceptions.Timeout:
         logger.warning("Timeout exchanging Copilot token for host %s", host)
+    except CopilotAuthRevokedError:
+        # Terminal — must NOT be swallowed by the generic handler below,
+        # which is reserved for transient/unexpected failures worth a None
+        # (caller retries later). Re-raise so it propagates to the caller.
+        raise
     except Exception as exc:
         logger.warning("Copilot token exchange error: %s", exc)
     return None
@@ -354,7 +395,16 @@ def get_valid_session_token(
     """Return a valid Copilot session token, refreshing if needed.
 
     Checks in-memory cache → on-disk cache → exchanges for a new one.
-    Returns the raw bearer token string or ``None``.
+    Returns the raw bearer token string, or ``None`` for a transient failure
+    worth retrying later (timeout, unexpected error, non-200/401 response).
+
+    Raises ``CopilotAuthRevokedError`` (swp-erq2) — deliberately NOT caught
+    here — when the underlying exchange confirms the token itself is revoked
+    (401). That's a terminal condition distinct from every other failure
+    this function can hit, so it propagates instead of collapsing into the
+    same ``None`` every transient failure returns; see the exception's own
+    docstring for how callers downstream (should_retry_streaming,
+    cli_runner's turn-exception renderer) pick it up automatically.
     """
     key = _cache_key(oauth_token, host)
 

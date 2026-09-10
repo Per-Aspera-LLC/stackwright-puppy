@@ -17,6 +17,7 @@ from code_puppy.messaging import emit_error, emit_info, emit_success, emit_warni
 
 from .config import COPILOT_AUTH_CONFIG
 from .utils import (
+    CopilotAuthRevokedError,
     add_models_to_config,
     clear_caches,
     fetch_copilot_models,
@@ -73,7 +74,14 @@ def _handle_copilot_status() -> None:
 
     # Check session token for each host
     for t in tokens:
-        session = get_valid_session_token(t.oauth_token, t.host)
+        try:
+            session = get_valid_session_token(t.oauth_token, t.host)
+        except CopilotAuthRevokedError:
+            # Terminal, not transient — tell the user plainly instead of the
+            # vague "may be expired" wording reserved for actual uncertainty.
+            emit_warning(f"   ❌ {t.host}: OAuth token is revoked or invalid")
+            emit_info(f"      Run /copilot-login {t.host} to re-authenticate.")
+            continue
         if session:
             emit_info(f"   ✅ {t.host}: active session (auto-refreshes on expiry)")
         else:
@@ -292,7 +300,19 @@ def _handle_copilot_login(command: str) -> None:
 
     # Exchange for Copilot session token & register models
     emit_info("Exchanging for Copilot session token…")
-    session = get_valid_session_token(oauth_token, host)
+    try:
+        session = get_valid_session_token(oauth_token, host)
+    except CopilotAuthRevokedError:
+        # Freshly-minted token rejected outright — a config/permissions
+        # issue on GitHub's side, not something re-running this login will
+        # fix by itself. Surface it plainly rather than the generic
+        # "may not have Copilot access" guess below.
+        emit_error(
+            "The GitHub token we just obtained was rejected (401) by the "
+            "Copilot token endpoint. Check that Copilot is enabled for this "
+            "account/organization, then try /copilot-login again."
+        )
+        return
     if not session:
         emit_warning(
             "Got a GitHub token but could not obtain a Copilot session token.\n"
@@ -371,7 +391,15 @@ def _create_copilot_model(model_name: str, model_config: Dict, config: Dict) -> 
         return None
 
     # Verify we can get an initial session token
-    session_token = get_valid_session_token(preferred.oauth_token, preferred.host)
+    try:
+        session_token = get_valid_session_token(preferred.oauth_token, preferred.host)
+    except CopilotAuthRevokedError:
+        emit_warning(
+            f"Copilot OAuth token for '{preferred.host}' is revoked or invalid; "
+            f"skipping model '{model_config.get('name')}'. Run /copilot-login "
+            f"{preferred.host} to re-authenticate."
+        )
+        return None
     if not session_token:
         emit_warning(
             f"Could not obtain Copilot session token; skipping model '{model_config.get('name')}'. "
@@ -397,6 +425,17 @@ def _create_copilot_model(model_name: str, model_config: Dict, config: Dict) -> 
             self._host = token_host
 
         def auth_flow(self, request: httpx.Request):
+            # swp-erq2: deliberately NOT catching CopilotAuthRevokedError
+            # here. This is the live per-request path — before this fix,
+            # a revoked token made get_valid_session_token() return a bare
+            # None, so this method would silently send the request with NO
+            # Authorization header at all, producing a fresh (and confusing)
+            # 401 from the API itself instead of failing fast on the
+            # already-known-dead credential. Letting the exception propagate
+            # means it reaches pydantic-ai's model call still carrying
+            # status_code=401, gets classified terminal (never retried) by
+            # should_retry_streaming, and surfaces immediately via
+            # cli_runner's "re-run auth" hint instead of stalling.
             token = get_valid_session_token(self._oauth_token, self._host)
             if token:
                 request.headers["Authorization"] = f"Bearer {token}"

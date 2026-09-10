@@ -141,6 +141,26 @@ def should_retry_streaming(exc: Exception) -> bool:
     if isinstance(exc, _RETRYABLE_EXCEPTIONS):
         return True
 
+    # swp-erq2: 401/403 (authentication_error / permission_denied) are ALWAYS
+    # terminal, checked first and unconditionally, before any snippet-text
+    # matching below gets a chance to run. This closes a real loophole: a
+    # provider's 401/403 error body can legitimately contain generic wording
+    # like "please retry your request" or "internal server error" (several
+    # providers reuse the same boilerplate copy across error types), which
+    # would otherwise let _matches_retryable_snippet coincidentally classify
+    # an auth failure as retryable. No amount of retrying fixes a revoked/
+    # invalid credential — silently retrying just burns time (a sub-agent's
+    # revoked OAuth token producing a ~90-minute stall before anyone noticed
+    # it was dead) instead of failing fast with an actionable message. 429
+    # is deliberately NOT included here: it already surfaces terminally once
+    # every retry layer is exhausted (see the 429 branch below, and
+    # RetryingAsyncClient's own bounded retries) and that existing
+    # retry-then-terminal behavior is correct for rate limits, unlike a dead
+    # credential where retrying can never succeed.
+    status_code = getattr(exc, "status_code", None)
+    if status_code in (401, 403):
+        return False
+
     msg = str(exc)
     if isinstance(exc, UnexpectedModelBehavior):
         return _matches_retryable_snippet(msg)
@@ -152,6 +172,12 @@ def should_retry_streaming(exc: Exception) -> bool:
         if isinstance(body, dict):
             body_msg = str(body.get("message", ""))
             body_type = str(body.get("type", "")).lower()
+            if body_type in (
+                "authentication_error",
+                "permission_denied",
+                "permission_error",
+            ):
+                return False
             if _matches_retryable_snippet(body_msg):
                 return True
             if "rate" in body_type and "limit" in body_type:
@@ -161,7 +187,9 @@ def should_retry_streaming(exc: Exception) -> bool:
 
     # Retry on pydantic-ai ModelHTTPError rate limits (e.g. 429 from providers)
     if ModelHTTPError is not None and isinstance(exc, ModelHTTPError):
-        status_code = getattr(exc, "status_code", None)
+        # status_code already checked for 401/403 above (both ModelHTTPError
+        # and OpenAIAPIError/APIStatusError expose it via the same
+        # `.status_code` attribute name).
         if status_code == 429:
             return True
         # Retry on 5xx server errors as well

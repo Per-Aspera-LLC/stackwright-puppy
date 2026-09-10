@@ -77,6 +77,24 @@ def _render_turn_exception(exc: Exception) -> None:
         )
         return
 
+    # swp-erq2: 401/403 are classified terminal (never retryable) by
+    # should_retry_streaming_exception above, so they fall through to here —
+    # give them their own actionable hint instead of a bare traceback. A
+    # revoked/expired credential needs a re-auth, not a re-run of the prompt.
+    status_code = getattr(exc, "status_code", None)
+    if status_code in (401, 403):
+        from code_puppy.messaging import emit_error
+
+        kind = "revoked or invalid" if status_code == 401 else "insufficient"
+        emit_error(
+            f"\U0001f512 Authentication failed ({status_code} {type(exc).__name__}): "
+            f"the model provider's credential is {kind}. Re-running your prompt "
+            "won't help \u2014 re-run auth for this provider (e.g. /copilot-login, "
+            "/claude-login, or whatever this provider's login command is) and "
+            "try again."
+        )
+        return
+
     from code_puppy.messaging.queue_console import get_queue_console
 
     get_queue_console().print_exception()
