@@ -391,3 +391,124 @@ class TestClaudeCodeToolPrefixGating:
             ToolManager.get_tool_def(mgr, "cp_read_file")
 
         assert seen_names == ["cp_read_file"]
+
+    def test_unprefix_uses_active_agent_pinned_model_over_global(self):
+        """swp-e2uq / swp-aj1o.2.8: the ACTIVE agent's per-agent-pinned model
+        must win over the process-global model name -- a mixed-pin raft run
+        can have one otter pinned to a claude-code model while the global
+        default (and other otters) are on something else entirely.
+        """
+        ToolManager = self._install_patch()
+
+        seen_names: list = []
+
+        def fake_lookup(self, name):
+            seen_names.append(name)
+            return None
+
+        with (
+            patch(
+                "pydantic_ai._tool_manager.ToolManager.get_tool_def",
+                fake_lookup,
+            ),
+            patch(
+                "code_puppy.agents.agent_manager.get_current_agent_name",
+                return_value="qa-otter",
+            ),
+            patch(
+                "code_puppy.config.get_agent_pinned_model",
+                return_value="claude-code-claude-opus-4-7",
+            ),
+            # Global says something else entirely -- must be ignored, the
+            # otter's own pin takes precedence.
+            patch(
+                "code_puppy.config.get_global_model_name",
+                return_value="some-custom-anthropic-model",
+            ),
+        ):
+            from code_puppy.pydantic_patches import patch_tool_call_callbacks
+
+            patch_tool_call_callbacks()
+            mgr = ToolManager.__new__(ToolManager)
+            ToolManager.get_tool_def(mgr, "cp_read_file")
+
+        assert seen_names == ["read_file"], (
+            f"active agent's pinned claude-code model should win over the "
+            f"global model, got {seen_names}"
+        )
+
+    def test_unprefix_falls_back_to_global_when_agent_unpinned(self):
+        """No per-agent pin -> fall back to the global model name, exactly
+        like BaseAgent.get_model_name()'s own pinned-or-global fallback.
+        """
+        ToolManager = self._install_patch()
+
+        seen_names: list = []
+
+        def fake_lookup(self, name):
+            seen_names.append(name)
+            return None
+
+        with (
+            patch(
+                "pydantic_ai._tool_manager.ToolManager.get_tool_def",
+                fake_lookup,
+            ),
+            patch(
+                "code_puppy.agents.agent_manager.get_current_agent_name",
+                return_value="code-puppy",
+            ),
+            patch("code_puppy.config.get_agent_pinned_model", return_value=None),
+            patch(
+                "code_puppy.config.get_global_model_name",
+                return_value="claude-code-claude-opus-4-7",
+            ),
+        ):
+            from code_puppy.pydantic_patches import patch_tool_call_callbacks
+
+            patch_tool_call_callbacks()
+            mgr = ToolManager.__new__(ToolManager)
+            ToolManager.get_tool_def(mgr, "cp_read_file")
+
+        assert seen_names == ["read_file"], (
+            f"unpinned agent should fall back to the global model, got {seen_names}"
+        )
+
+    def test_unprefix_falls_back_to_global_when_agent_lookup_raises(self):
+        """If resolving the active agent/pin blows up, fall back to the
+        global model name rather than crashing the tool-name normalizer.
+        """
+        ToolManager = self._install_patch()
+
+        seen_names: list = []
+
+        def fake_lookup(self, name):
+            seen_names.append(name)
+            return None
+
+        def boom():
+            raise RuntimeError("no active session")
+
+        with (
+            patch(
+                "pydantic_ai._tool_manager.ToolManager.get_tool_def",
+                fake_lookup,
+            ),
+            patch(
+                "code_puppy.agents.agent_manager.get_current_agent_name",
+                side_effect=boom,
+            ),
+            patch(
+                "code_puppy.config.get_global_model_name",
+                return_value="claude-code-claude-opus-4-7",
+            ),
+        ):
+            from code_puppy.pydantic_patches import patch_tool_call_callbacks
+
+            patch_tool_call_callbacks()
+            mgr = ToolManager.__new__(ToolManager)
+            ToolManager.get_tool_def(mgr, "cp_read_file")
+
+        assert seen_names == ["read_file"], (
+            f"agent-lookup failure should fall back to the global model, got {seen_names}"
+        )

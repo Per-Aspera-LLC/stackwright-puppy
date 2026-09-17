@@ -213,6 +213,65 @@ def test_tool_complete_success_failure(reloaded_telemetry):
     assert ev_ok.success is True, "expected success=True for clean result"
 
 
+def test_tool_complete_classification_echo_tag(reloaded_telemetry):
+    """swp-e2uq / swp-aj1o.2.8: sub-0.1ms failed tool_complete events are
+    tagged classificationEcho=True; everything else omits the field.
+
+    pydantic-ai's ToolManager fires a synthetic pre-classification
+    tool_complete (success=False, durationMs~0) immediately before the real
+    call's own tool_complete -- a double-fire, not two distinct failures.
+    """
+    ndjson_path = reloaded_telemetry
+    adapter = TypeAdapter(OtterEvent)
+
+    # 1. Echo signature: fast failure -> tagged.
+    asyncio.run(
+        _trigger_callbacks(
+            "post_tool_call", "cp_shell", {}, {"error": "unknown tool"}, 0.05, None
+        )
+    )
+    # 2. Slow failure: a real failure, NOT an echo -> untagged.
+    asyncio.run(
+        _trigger_callbacks(
+            "post_tool_call", "cp_shell", {}, {"error": "timed out"}, 250.0, None
+        )
+    )
+    # 3. Fast SUCCESS: success=True is never an echo regardless of speed.
+    asyncio.run(
+        _trigger_callbacks(
+            "post_tool_call", "cp_shell", {}, {"stdout": "ok"}, 0.05, None
+        )
+    )
+    # 4. Failure with unknown duration: can't confirm the echo signature
+    #    without a duration, so never tagged.
+    asyncio.run(
+        _trigger_callbacks(
+            "post_tool_call", "cp_shell", {}, {"error": "boom"}, None, None
+        )
+    )
+
+    lines = ndjson_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 4, f"expected 4 events, got {len(lines)}"
+    events = [adapter.validate_json(line) for line in lines]
+    for ev in events:
+        assert isinstance(ev, ToolCompleteEvent)
+
+    assert events[0].classificationEcho is True, "fast failure must be tagged"
+    assert events[1].classificationEcho is None, "slow failure must NOT be tagged"
+    assert events[2].classificationEcho is None, "fast success must NOT be tagged"
+    assert events[3].classificationEcho is None, (
+        "unknown-duration failure must NOT be tagged (can't confirm the echo signature)"
+    )
+
+    # exclude_none=True on the writer means the field is fully ABSENT from
+    # the untagged events' raw JSON, not present-and-null.
+    raw = [json.loads(line) for line in lines]
+    assert raw[0]["classificationEcho"] is True
+    assert "classificationEcho" not in raw[1]
+    assert "classificationEcho" not in raw[2]
+    assert "classificationEcho" not in raw[3]
+
+
 # ---------------------------------------------------------------------------
 # Sub-agent translation tests (invoke_agent → agent_invoke_start/complete)
 # ---------------------------------------------------------------------------
@@ -296,7 +355,9 @@ def test_invoke_agent_complete_emits_agent_invoke_complete_not_tool_complete(
     lines = ndjson_path.read_text(encoding="utf-8").splitlines()
     # 2 events: agent_invoke_complete + token_update (per-subagent telemetry;
     # response="hello" is non-empty so Option B fallback fires).
-    assert len(lines) == 2, f"expected 2 events (complete + token_update), got {len(lines)}"
+    assert len(lines) == 2, (
+        f"expected 2 events (complete + token_update), got {len(lines)}"
+    )
 
     ev = json.loads(lines[0])
     assert ev["type"] == "agent_invoke_complete"

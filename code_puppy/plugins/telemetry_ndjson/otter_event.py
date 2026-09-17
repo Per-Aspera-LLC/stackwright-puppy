@@ -178,6 +178,15 @@ class ToolCompleteEvent(OtterBase):
     toolName: str
     success: bool | None = None
     durationMs: float | None = None
+    classificationEcho: bool | None = None
+    """Best-effort tag (swp-e2uq / swp-aj1o.2.8): True when this event is the
+    sub-0.1ms pre-classification failure that double-fires alongside a real
+    tool_complete for the same call (success=False, durationMs < 0.1). Absent
+    (None) for every normal event -- consumers that don't know this field
+    should treat it exactly like they always have. Pro's read-time
+    canonicalizer (packages/raft/src/telemetry/canonicalize.ts) computes the
+    same tag independently from durationMs/success, so this field is a
+    write-time convenience, not a hard dependency."""
 
 
 class AgentInvokeStartEvent(OtterBase):

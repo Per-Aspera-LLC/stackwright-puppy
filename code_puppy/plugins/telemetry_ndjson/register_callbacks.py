@@ -125,6 +125,32 @@ def _is_successful_result(result: Any) -> bool:
     return True
 
 
+# swp-e2uq / swp-aj1o.2.8: pydantic-ai's ToolManager fires a synthetic,
+# pre-classification tool_complete (success=False, durationMs~0) for a tool
+# call BEFORE the real call executes and its own tool_complete follows --
+# a double-fire, not two distinct failures. Both durationMs and success must
+# be present for the tag to apply; a None duration (unknown timing) is never
+# tagged as an echo, since we can't distinguish it from a real fast failure.
+_CLASSIFICATION_ECHO_DURATION_MS_THRESHOLD = 0.1
+
+
+def _is_classification_echo(success: bool, duration_ms: float | None) -> bool | None:
+    """Best-effort tag: is this ToolCompleteEvent the sub-0.1ms echo?
+
+    Returns True when it matches the echo signature, otherwise None (NOT
+    False) so the field is omitted from the emitted JSON for every normal
+    event -- matching pro's read-time canonicalizer, which also leaves the
+    tag absent rather than explicitly False when it doesn't apply.
+    """
+    if (
+        success is False
+        and duration_ms is not None
+        and duration_ms < (_CLASSIFICATION_ECHO_DURATION_MS_THRESHOLD)
+    ):
+        return True
+    return None
+
+
 def _current_otter() -> str | None:
     """Return the currently active sub-agent's name, or None if at top-level.
 
@@ -348,14 +374,16 @@ async def _on_post_tool_call(*args: Any, **kwargs: Any) -> None:
                 )
             return  # Skip generic tool_complete for sub-agent dispatches.
 
+        _success = _is_successful_result(result)
         writer.emit(
             ToolCompleteEvent(
                 ts=now_iso(),
                 seq=next_seq(),
                 otter=_current_otter(),
                 toolName=str(tool_name),
-                success=_is_successful_result(result),
+                success=_success,
                 durationMs=duration_ms,
+                classificationEcho=_is_classification_echo(_success, duration_ms),
             )
         )
     except Exception as e:

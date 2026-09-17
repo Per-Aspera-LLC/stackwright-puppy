@@ -242,18 +242,55 @@ def patch_tool_call_callbacks() -> None:
         # convention (see plugins/claude_code_oauth/prompt_handler.py).
         _CLAUDE_CODE_MODEL_PREFIX = "claude-code"
 
-        def _is_claude_code_model_active() -> bool:
-            """Best-effort check: is the currently selected model a claude-code one?
+        def _active_model_name() -> str:
+            """Resolve the model actually driving THIS call: the currently
+            active agent's per-agent pin, falling back to the global model
+            name if unpinned -- not just the process-global model name.
 
-            Lazy-imported so this patch stays safe to apply before config is
-            initialised; any failure means "not claude-code" so we never
-            accidentally strip prefixes from non-claude-code tool names.
+            R12 (swp-e2uq) found that reading only the global name is a
+            latent bug for mixed-pin raft runs: a raft session can pin
+            different models per otter (see BaseAgent.get_model_name(),
+            which already implements this exact pinned-or-global fallback
+            for the interactive/single-agent path) while the foreman or a
+            sibling otter runs on a different model. Mirrors that same
+            pinned-or-global lookup directly (rather than instantiating a
+            full agent via get_current_agent()) so it stays cheap and so
+            each lookup goes through the same lazily-imported
+            code_puppy.config functions the rest of this module already
+            uses -- keeping it mockable the same way.
+
+            Lazy-imported so this patch stays safe to apply before config/
+            agents are initialised; any failure falls back to the global
+            model name, then to "" (never raises).
             """
+            try:
+                from code_puppy.agents.agent_manager import get_current_agent_name
+                from code_puppy.config import get_agent_pinned_model
+
+                agent_name = get_current_agent_name()
+                pinned = get_agent_pinned_model(agent_name) if agent_name else None
+                if pinned:
+                    return pinned
+            except Exception:
+                pass
             try:
                 from code_puppy.config import get_global_model_name
 
-                model_name = get_global_model_name() or ""
-                return model_name.startswith(_CLAUDE_CODE_MODEL_PREFIX)
+                return get_global_model_name() or ""
+            except Exception:
+                return ""
+
+        def _is_claude_code_model_active() -> bool:
+            """Best-effort check: is the model driving the ACTIVE agent a
+            claude-code one?
+
+            Uses the active agent's resolved (pinned-or-global) model, not
+            just the process-global model name -- see _active_model_name().
+            Any failure means "not claude-code" so we never accidentally
+            strip prefixes from non-claude-code tool names.
+            """
+            try:
+                return _active_model_name().startswith(_CLAUDE_CODE_MODEL_PREFIX)
             except Exception:
                 return False
 
